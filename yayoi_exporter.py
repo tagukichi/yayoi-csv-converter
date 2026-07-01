@@ -21,8 +21,9 @@ JOURNAL_FLAG = "2000"
 # 弥生の取込ファイルは Shift-JIS。UTF-8 で書き出すと文字化け・取込エラーになる。
 ENCODING = "cp932"
 
-# 25列のヘッダ（弥生の取込仕様順）。弥生はヘッダ行を読まないが、人が中身を
-# 確認しやすいように先頭に付ける（取込時は読み飛ばし設定にする想定）。
+# 25列のヘッダ（弥生の取込仕様順）。弥生のインポートはヘッダ行を自動で
+# 読み飛ばさないため、取込用CSVにはヘッダを付けない（include_header=False が既定）。
+# ヘッダ付きは人がExcel等で中身を確認する用途向け。
 HEADER = [
     "識別フラグ", "伝票No", "決算", "取引日付",
     "借方勘定科目", "借方補助科目", "借方部門", "借方税区分", "借方金額", "借方税金額",
@@ -44,26 +45,26 @@ def _row(entry: JournalEntry, denpyo_no: int) -> list[str]:
         entry.debit_dept,        # 借方部門
         entry.debit_tax,         # 借方税区分
         amount,                  # 借方金額
-        "0",                     # 借方税金額
+        "",                      # 借方税金額（税区分「〜込」なら弥生側で自動計算）
         entry.credit_account,    # 貸方勘定科目
         entry.credit_sub,        # 貸方補助科目
         entry.credit_dept,       # 貸方部門
         entry.credit_tax,        # 貸方税区分
         amount,                  # 貸方金額
-        "0",                     # 貸方税金額
+        "",                      # 貸方税金額
         entry.description,       # 摘要
         "",                      # 番号
         "",                      # 期日
-        "",                      # タイプ
+        "0",                     # タイプ（0=仕訳データ）
         "",                      # 生成元
         "",                      # 仕訳メモ
-        "",                      # 付箋1
-        "",                      # 付箋2
+        "0",                     # 付箋1
+        "0",                     # 付箋2
         "no",                    # 調整
     ]
 
 
-def to_yayoi_csv(entries: list[JournalEntry], *, include_header: bool = True) -> bytes:
+def to_yayoi_csv(entries: list[JournalEntry], *, include_header: bool = False) -> bytes:
     """仕訳の一覧を弥生インポート形式CSV（Shift-JISバイト列）に変換する。
 
     Streamlit の download_button にそのまま渡せるよう bytes を返す。

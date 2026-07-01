@@ -48,15 +48,19 @@ def test_yayoi_csv_structure():
     text = raw.decode(ENCODING)
     lines = text.strip().split("\r\n")
 
-    # ヘッダ + 2明細行
-    assert len(lines) == 3
+    # 既定はヘッダなし（弥生はヘッダ行を読み飛ばさない）で明細2行のみ
+    assert len(lines) == 2
     # 25列ある
     assert len(lines[0].split(",")) == len(HEADER) == 25
     # 明細行は識別フラグ "2000" で始まる
-    assert lines[1].startswith("2000,")
+    assert lines[0].startswith("2000,")
     # 金額が借方・貸方の両方に入っている
-    assert "1500" in lines[1]
-    assert "715000" in lines[2]
+    assert "1500" in lines[0]
+    assert "715000" in lines[1]
+
+    # ヘッダ付き（確認用）も選べる
+    with_header = to_yayoi_csv(entries, include_header=True).decode(ENCODING)
+    assert with_header.startswith("識別フラグ,")
 
 
 def _run():
