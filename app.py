@@ -50,6 +50,9 @@ with st.sidebar:
     if accounting_software != "弥生":
         st.caption("⚠️ 現在は弥生のみ対応しています（他は対応予定）。")
 
+    st.divider()
+    st.caption(f"💾 データ保存先: {storage.backend_name()}")
+
 if client is None:
     st.info("サイドバーの「企業の追加・削除」からクライアント企業を登録してください。")
     st.stop()

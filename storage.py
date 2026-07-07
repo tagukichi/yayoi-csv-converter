@@ -1,12 +1,16 @@
-"""仕訳データの永続化（SQLite）。
+"""仕訳データの永続化（Supabase / SQLite の二段構え）。
 
-クライアント企業ごとに仕訳を蓄積し、アプリを再起動しても消えないようにする。
-Google Drive版でも同じ蓄積の仕組みを使い回す想定。DBファイルは data/ 配下に
-置き、リポジトリにはコミットしない（.gitignore 済み）。
+.env に SUPABASE_URL と SUPABASE_KEY があれば Supabase(Postgres) を使い、
+なければローカルの SQLite にフォールバックする。テーブル構造は両者で同一
+（supabase_schema.sql 参照）。テストは db_path を明示指定するため常に SQLite。
+
+SQLite の DB ファイルは data/ 配下に置き、リポジトリにはコミットしない
+（.gitignore 済み）。
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -51,6 +55,85 @@ CREATE TABLE IF NOT EXISTS clients (
 )
 """
 
+# --- Supabase バックエンド ---
+
+_sb_client = None
+
+
+def _supabase_enabled(db_path: Path) -> bool:
+    """Supabase を使うか。テスト等で db_path が明示された場合は常に SQLite。"""
+    if db_path is not DB_PATH:
+        return False
+    return bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"))
+
+
+def backend_name() -> str:
+    """画面表示用: 現在使っているDBの名前。"""
+    return "Supabase" if _supabase_enabled(DB_PATH) else "ローカル (SQLite)"
+
+
+def _sb():
+    """Supabase クライアント（遅延生成のシングルトン）。"""
+    global _sb_client
+    if _sb_client is None:
+        from supabase import create_client
+
+        _sb_client = create_client(
+            os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"]
+        )
+    return _sb_client
+
+
+def _entry_to_record(client: str, e: JournalEntry, source_file: str) -> dict:
+    return {
+        "client": client,
+        "date": e.date.strftime("%Y/%m/%d"),
+        "debit_account": e.debit_account,
+        "debit_tax": e.debit_tax,
+        "credit_account": e.credit_account,
+        "credit_tax": e.credit_tax,
+        "amount": e.amount,
+        "description": e.description,
+        "needs_review": bool(e.needs_review),
+        "source_file": source_file,
+    }
+
+
+def _row_to_record(client: str, r: pd.Series) -> dict:
+    return {
+        "client": client,
+        "date": str(r["取引日付"]).strip(),
+        "debit_account": str(r["借方勘定科目"]).strip(),
+        "debit_tax": str(r["借方税区分"]).strip() or "対象外",
+        "credit_account": str(r["貸方勘定科目"]).strip(),
+        "credit_tax": str(r["貸方税区分"]).strip() or "対象外",
+        "amount": int(r["金額"]),
+        "description": str(r["摘要"]).strip(),
+        "needs_review": bool(r["要確認"]),
+        "source_file": str(r["出典ファイル"]).strip(),
+    }
+
+
+_JP_COLUMNS = {
+    "date": "取引日付",
+    "debit_account": "借方勘定科目",
+    "debit_tax": "借方税区分",
+    "credit_account": "貸方勘定科目",
+    "credit_tax": "貸方税区分",
+    "amount": "金額",
+    "description": "摘要",
+    "needs_review": "要確認",
+    "source_file": "出典ファイル",
+}
+
+
+def _records_to_df(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=list(_JP_COLUMNS.values()))
+    df = pd.DataFrame(records)[list(_JP_COLUMNS.keys())].rename(columns=_JP_COLUMNS)
+    df["要確認"] = df["要確認"].astype(bool)
+    return df
+
 
 def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +154,9 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
 
 def list_clients(db_path: Path = DB_PATH) -> list[str]:
     """登録済みの企業名一覧を返す。"""
+    if _supabase_enabled(db_path):
+        res = _sb().table("clients").select("name").order("name").execute()
+        return [r["name"] for r in res.data]
     with _connect(db_path) as conn:
         return [r[0] for r in conn.execute("SELECT name FROM clients ORDER BY name")]
 
@@ -80,6 +166,12 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
     name = name.strip()
     if not name:
         return False
+    if _supabase_enabled(db_path):
+        try:
+            _sb().table("clients").insert({"name": name}).execute()
+        except Exception:  # 重複（unique違反）など
+            return False
+        return True
     with _connect(db_path) as conn:
         try:
             conn.execute("INSERT INTO clients (name) VALUES (?)", (name,))
@@ -90,6 +182,10 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
 
 def delete_client(name: str, db_path: Path = DB_PATH) -> None:
     """企業を削除する。その企業の仕訳もまとめて削除する。"""
+    if _supabase_enabled(db_path):
+        _sb().table("entries").delete().eq("client", name).execute()
+        _sb().table("clients").delete().eq("name", name).execute()
+        return
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM entries WHERE client = ?", (name,))
         conn.execute("DELETE FROM clients WHERE name = ?", (name,))
@@ -104,6 +200,11 @@ def add_entries(
     """解析結果の仕訳をクライアントの台帳に追記する。追加件数を返す。"""
     if not entries:
         return 0
+    if _supabase_enabled(db_path):
+        _sb().table("entries").insert(
+            [_entry_to_record(client, e, source_file) for e in entries]
+        ).execute()
+        return len(entries)
     with _connect(db_path) as conn:
         conn.executemany(
             """INSERT INTO entries
@@ -132,6 +233,12 @@ def add_entries(
 
 def load_entries(client: str, db_path: Path = DB_PATH) -> pd.DataFrame:
     """クライアントの仕訳一覧を data_editor 用の DataFrame で返す。"""
+    if _supabase_enabled(db_path):
+        res = (
+            _sb().table("entries").select("*")
+            .eq("client", client).order("date").order("id").execute()
+        )
+        return _records_to_df(res.data)
     with _connect(db_path) as conn:
         df = pd.read_sql_query(
             """SELECT date AS 取引日付,
@@ -157,6 +264,12 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
     data_editor 上での修正・行追加・行削除をまとめて反映するための操作。
     保存件数を返す。
     """
+    if _supabase_enabled(db_path):
+        records = [_row_to_record(client, r) for _, r in df.iterrows()]
+        _sb().table("entries").delete().eq("client", client).execute()
+        if records:
+            _sb().table("entries").insert(records).execute()
+        return len(records)
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM entries WHERE client = ?", (client,))
         rows = [
@@ -187,5 +300,8 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
 
 def clear_entries(client: str, db_path: Path = DB_PATH) -> None:
     """クライアントの台帳を全削除する。"""
+    if _supabase_enabled(db_path):
+        _sb().table("entries").delete().eq("client", client).execute()
+        return
     with _connect(db_path) as conn:
         conn.execute("DELETE FROM entries WHERE client = ?", (client,))
