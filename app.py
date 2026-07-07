@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 import storage
 from models import JournalEntry
-from ocr import AzureOCRError, credentials_available, run_ocr
-from parser import parse_document
+from ocr import AzureOCRError, credentials_available, group_rows, run_ocr_lines
+from parser import parse_document, parse_table_document
 from yayoi_exporter import to_yayoi_csv
 
 load_dotenv()
@@ -66,15 +66,29 @@ if st.button("変換を開始", type="primary"):
                         st.caption("xlsx の自動解析は未対応です（プレビューのみ）。")
                     else:
                         with st.spinner("OCR処理中..."):
-                            lines = run_ocr(f.getvalue())
-                        result = parse_document(lines, document_type, source_name=f.name)
+                            ocr_lines = run_ocr_lines(f.getvalue())
+                        if document_type in ("通帳", "カード明細"):
+                            # 座標で表の行を復元してから解析する
+                            rows = group_rows(ocr_lines)
+                            result = parse_table_document(rows, document_type, source_name=f.name)
+                            preview = "\n".join(
+                                " | ".join(c.text for c in row) for row in rows
+                            )
+                        else:
+                            texts = [ln.text for ln in ocr_lines]
+                            result = parse_document(texts, document_type, source_name=f.name)
+                            preview = "\n".join(texts)
                         for w in result.warnings:
                             st.warning(w)
                         added = storage.add_entries(client, result.entries, source_file=f.name)
                         added_total += added
                         if added:
-                            st.success(f"{added} 件の仕訳を追加しました（要確認として登録）。")
-                        st.text_area("OCR結果", "\n".join(lines), height=200, key=f"ocr_{i}")
+                            review = result.needs_review_count
+                            st.success(
+                                f"{added} 件の仕訳を追加しました"
+                                f"（うち要確認 {review} 件）。"
+                            )
+                        st.text_area("OCR結果", preview, height=200, key=f"ocr_{i}")
                 except AzureOCRError as e:
                     st.error(f"OCRエラー: {e}")
                 except Exception as e:

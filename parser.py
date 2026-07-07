@@ -1,11 +1,11 @@
-"""OCR結果（テキスト行）→ 仕訳データへの暫定解析。
+"""OCR結果 → 仕訳データへの解析。
 
-現状は領収書・電子請求書向けの汎用ヒューリスティック（日付と合計金額を拾って
-1仕訳を起こす）のみ。精度は限定的なので、生成した仕訳はすべて「要確認」扱いに
-して人の修正を前提とする。
-
-通帳・カード明細は明細行が多数並ぶ表形式で、フォーマット（銀行・カード会社）
-ごとの専用解析が必要なため未対応。実物サンプル入手後に実装する。
+- 領収書・電子請求書: テキスト行から日付と合計金額を拾って1仕訳を起こす
+  （parse_document）。暫定解析のため全件「要確認」。
+- 通帳・カード明細: 座標で復元した表の行（ocr.group_rows の結果）を
+  1行=1取引として解析する（parse_table_document）。通帳は残高の連続性
+  （前残高 ± 入出金 = 残高）で入金/出金を判定し、合わない行だけ要確認に
+  落とす。銀行・カード会社ごとの細部はサンプルを見ながら調整する。
 """
 
 from __future__ import annotations
@@ -13,14 +13,23 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from accounts import estimate_expense_account
+from accounts import (
+    estimate_expense_account,
+    estimate_income_account,
+)
 from models import JournalEntry, ParseResult
+from ocr import OcrLine
 
 # 書類タイプ → 貸方勘定科目（支払手段）の既定値
 CREDIT_ACCOUNT_BY_DOC_TYPE = {
     "領収書": "現金",
     "電子請求書": "未払金",
 }
+
+# 通帳の預金口座に使う勘定科目
+BANK_ACCOUNT = "普通預金"
+# カード明細の支払いに使う勘定科目
+CARD_CREDIT_ACCOUNT = "未払金"
 
 # 対応する日付表記: 2026年4月1日 / 2026/04/01 / 2026-4-1 / 令和8年4月1日 / R8.4.1
 _DATE_PATTERNS = [
@@ -131,4 +140,191 @@ def parse_document(lines: list[str], document_type: str, source_name: str = "") 
             note="暫定解析（合計金額ベース）",
         )
     )
+    return result
+
+
+# --- 通帳・カード明細（表形式）の解析 ---
+
+# 通帳の日付セル: 08-04-01（和暦の令和8年）/ 2026-04-01 / 8.4.1 など
+_CELL_DATE_PATTERN = re.compile(r"^(\d{1,4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$")
+
+
+def _parse_cell_date(text: str) -> date | None:
+    """表のセル1つを日付として解釈する。
+
+    通帳の日付は「08-04-01」のように和暦（元号なし）で印字されることが
+    多い。年が18以下なら令和の年（+2018）、19〜99なら西暦下2桁とみなす。
+    """
+    m = _CELL_DATE_PATTERN.match(text.strip())
+    if not m:
+        return None
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if y <= 18:  # 令和（R18=2036年まで対応）
+        y += 2018
+    elif y <= 99:  # 西暦下2桁
+        y += 2000 if y < 80 else 1900
+    try:
+        return date(y, mo, d)
+    except ValueError:
+        return None
+
+
+def _parse_cell_amount(text: str) -> int | None:
+    """表のセル1つを金額として解釈する。通帳の「*150,000*」のような
+    記号付きにも対応。金額でなければ None。"""
+    t = text.strip().strip("*＊ ").replace("¥", "").replace("￥", "").replace("円", "")
+    t = t.replace(",", "").replace(" ", "")
+    if not t.isdigit():
+        return None
+    value = int(t)
+    if value > 1_000_000_000:
+        return None
+    return value
+
+
+def _split_row(cells: list[OcrLine]) -> tuple[date | None, str, list[tuple[int, float]]]:
+    """表の1行を (日付, 摘要, [(金額, X座標), ...]) に分解する。"""
+    row_date = None
+    desc_parts: list[str] = []
+    amounts: list[tuple[int, float]] = []
+    for cell in cells:
+        if row_date is None:
+            d = _parse_cell_date(cell.text)
+            if d:
+                row_date = d
+                continue
+        a = _parse_cell_amount(cell.text)
+        if a is not None:
+            amounts.append((a, cell.x))
+        else:
+            desc_parts.append(cell.text.strip())
+    return row_date, " ".join(p for p in desc_parts if p), amounts
+
+
+def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
+    """通帳の明細を解析する。
+
+    各行の一番右の金額を「残高」、その左を「入出金額」とみなし、
+    前行残高との差で入金/出金を判定する。判定できない行は要確認。
+    """
+    prev_balance: int | None = None
+    last_date: date | None = None
+    # 残高チェックで確定できた列位置を覚えて、チェック不能行の判定に使う
+    withdraw_xs: list[float] = []
+    deposit_xs: list[float] = []
+
+    for cells in rows:
+        row_date, desc, amounts = _split_row(cells)
+        if not amounts:
+            continue  # 見出し行・摘要のみの行
+
+        if row_date is None and last_date is None and len(amounts) == 1:
+            # 日付のない金額1つだけの行は繰越残高とみなす
+            prev_balance = amounts[0][0]
+            continue
+
+        if len(amounts) == 1:
+            # 入出金額か残高か判別できない。残高のみ更新行として扱う
+            prev_balance = amounts[0][0]
+            continue
+
+        movement, movement_x = amounts[-2]
+        balance = amounts[-1][0]
+        entry_date = row_date or last_date
+        if entry_date is None:
+            result.warnings.append(f"日付を特定できない行をスキップしました: {desc}")
+            continue
+        last_date = entry_date
+
+        needs_review = False
+        note = ""
+        if prev_balance is not None and prev_balance + movement == balance:
+            is_deposit = True
+            deposit_xs.append(movement_x)
+        elif prev_balance is not None and prev_balance - movement == balance:
+            is_deposit = False
+            withdraw_xs.append(movement_x)
+        else:
+            # 残高チェック不成立。既知の列位置から推定し、要確認にする
+            needs_review = True
+            note = "残高チェック不一致（入出金の向き・金額を確認）"
+            if prev_balance is not None:
+                result.warnings.append(
+                    f"残高が合いません: {entry_date} {desc}（要確認にしました）"
+                )
+            if deposit_xs and withdraw_xs:
+                is_deposit = abs(movement_x - _mean(deposit_xs)) < abs(
+                    movement_x - _mean(withdraw_xs)
+                )
+            else:
+                is_deposit = False
+        prev_balance = balance
+
+        if is_deposit:
+            account, unknown = estimate_income_account(desc)
+            entry = JournalEntry(
+                date=entry_date,
+                debit_account=BANK_ACCOUNT,
+                credit_account=account,
+                amount=movement,
+                description=desc,
+                needs_review=needs_review or unknown,
+                note=note,
+            )
+        else:
+            account, unknown = estimate_expense_account(desc)
+            entry = JournalEntry(
+                date=entry_date,
+                debit_account=account,
+                credit_account=BANK_ACCOUNT,
+                amount=movement,
+                description=desc,
+                needs_review=needs_review or unknown,
+                note=note,
+            )
+        result.entries.append(entry)
+
+
+def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
+    """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。"""
+    for cells in rows:
+        row_date, desc, amounts = _split_row(cells)
+        if row_date is None or not amounts:
+            continue  # 見出し・合計行など
+        amount = amounts[-1][0]
+        account, unknown = estimate_expense_account(desc)
+        result.entries.append(
+            JournalEntry(
+                date=row_date,
+                debit_account=account,
+                credit_account=CARD_CREDIT_ACCOUNT,
+                amount=amount,
+                description=desc,
+                needs_review=unknown,
+            )
+        )
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def parse_table_document(
+    rows: list[list[OcrLine]], document_type: str, source_name: str = ""
+) -> ParseResult:
+    """座標で復元した表の行から、通帳・カード明細の仕訳を起こす。"""
+    result = ParseResult()
+    if document_type == "通帳":
+        _parse_bankbook(rows, result)
+    elif document_type == "カード明細":
+        _parse_card(rows, result)
+    else:
+        result.warnings.append(f"書類タイプ「{document_type}」は表形式解析の対象外です。")
+        return result
+
+    if not result.entries:
+        result.warnings.append(
+            "明細行を検出できませんでした。OCR結果を確認してください"
+            "（レイアウトによっては調整が必要です。サンプルを共有してください）。"
+        )
     return result
