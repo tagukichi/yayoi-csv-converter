@@ -42,7 +42,10 @@ _DATE_PATTERNS = [
 # 桁区切りなしの裸の数字は年号・番号と区別できないため拾わない。
 _AMOUNT_PATTERN = re.compile(r"[¥￥]?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:円)?")
 
-_TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額")
+_TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額", "お買上げ計", "お買い上げ計")
+
+# レシートで合計と誤認しやすい行（預り金・釣り銭・ポイント）は金額候補から除外する
+_EXCLUDE_KEYWORDS = ("預り", "預かり", "お釣", "おつり", "釣り銭", "釣銭", "ポイント")
 
 
 def _to_date(m: re.Match, era: bool) -> date | None:
@@ -85,10 +88,14 @@ def _find_total(lines: list[str]) -> int | None:
     all_amounts: list[int] = []
     keyword_hits: list[int] = []
     for i, line in enumerate(lines):
+        if any(kw in line for kw in _EXCLUDE_KEYWORDS):
+            continue
         amounts = _amounts_in(line)
         all_amounts.extend(amounts)
         if any(kw in line for kw in _TOTAL_KEYWORDS):
             for near in lines[i : i + 3]:
+                if any(kw in near for kw in _EXCLUDE_KEYWORDS):
+                    continue
                 near_amounts = _amounts_in(near)
                 if near_amounts:
                     keyword_hits.append(near_amounts[0])

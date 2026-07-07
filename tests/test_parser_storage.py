@@ -56,6 +56,31 @@ def test_parse_reiwa_date():
     assert result.entries[0].date == date(2026, 4, 1)
 
 
+def test_receipt_ignores_tendered_and_change():
+    """コンビニレシート: お預り・お釣りを合計と誤認しない。"""
+    lines = [
+        "コンビニ〇〇店",
+        "2026年7月1日",
+        "おにぎり ¥150",
+        "お茶 ¥140",
+        "合計",
+        "¥1,290",
+        "お預り",
+        "¥10,000",
+        "お釣り",
+        "¥8,710",
+    ]
+    result = parse_document(lines, "領収書")
+    assert result.entries[0].amount == 1290
+
+
+def test_receipt_fallback_excludes_tendered():
+    """「合計」が読めなかった場合の最大値フォールバックでも預り金は除外。"""
+    lines = ["2026/07/01", "¥1,290", "お預り ¥10,000"]
+    result = parse_document(lines, "領収書")
+    assert result.entries[0].amount == 1290
+
+
 def test_unsupported_doc_type():
     result = parse_document(["何か"], "通帳")
     assert result.entries == []
