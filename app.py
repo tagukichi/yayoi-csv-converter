@@ -16,21 +16,43 @@ st.set_page_config(page_title="PDF → 弥生CSV 変換ツール", page_icon="�
 
 st.title("PDF → 弥生CSV 変換ツール")
 
+# マネーフォワード / freee は対応実装後に選択肢へ戻す（コードは温存して非表示）
+ACCOUNTING_SOFTWARE_OPTIONS = ["弥生"]  # + ["マネーフォワード", "freee"]
+
 # --- サイドバー ---
 with st.sidebar:
     st.header("設定")
 
-    client = st.selectbox(
-        "クライアント企業",
-        ["A建設", "B工務店", "C社"],
-    )
+    clients = storage.list_clients()
+    client = st.selectbox("クライアント企業", clients) if clients else None
+
+    with st.expander("➕ 企業の追加・削除"):
+        new_client = st.text_input("追加する企業名", key="new_client_name")
+        if st.button("追加", key="add_client"):
+            if storage.add_client(new_client):
+                st.rerun()
+            else:
+                st.error("空欄か、すでに登録済みの企業名です。")
+        if client:
+            st.divider()
+            confirm_delete = st.checkbox(
+                f"「{client}」を削除する（蓄積した仕訳も削除されます）",
+                key="confirm_delete_client",
+            )
+            if st.button("削除", key="delete_client", disabled=not confirm_delete):
+                storage.delete_client(client)
+                st.rerun()
 
     accounting_software = st.radio(
         "出力する会計ソフト",
-        ["弥生", "マネーフォワード", "freee"],
+        ACCOUNTING_SOFTWARE_OPTIONS,
     )
     if accounting_software != "弥生":
         st.caption("⚠️ 現在は弥生のみ対応しています（他は対応予定）。")
+
+if client is None:
+    st.info("サイドバーの「企業の追加・削除」からクライアント企業を登録してください。")
+    st.stop()
 
 # --- メインエリア ---
 if not credentials_available():
@@ -107,36 +129,45 @@ df = storage.load_entries(client)
 if df.empty:
     st.caption("まだ仕訳がありません。ファイルをアップロードして「変換を開始」を押してください。")
 else:
-    review_count = int(df["要確認"].sum())
-    if review_count:
-        st.warning(f"⚠️ 要確認の仕訳が {review_count} 件あります。内容を確認し、修正したらチェックを外してください。")
+    tab_edit, tab_output = st.tabs(["✏️ 仕訳の編集", "🖨 出力プレビュー"])
 
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "取引日付": st.column_config.TextColumn(help="YYYY/MM/DD 形式"),
-            "金額": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
-            "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
-            "出典ファイル": st.column_config.TextColumn(disabled=True),
-        },
-        key="ledger_editor",
-    )
+    # --- 編集タブ ---
+    with tab_edit:
+        review_count = int(df["要確認"].sum())
+        if review_count:
+            st.warning(f"⚠️ 要確認の仕訳が {review_count} 件あります。内容を確認し、修正したらチェックを外してください。")
 
-    col_save, col_csv, col_clear = st.columns([1, 1, 1])
+        edited_df = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "取引日付": st.column_config.TextColumn(help="YYYY/MM/DD 形式"),
+                "金額": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
+                "出典ファイル": st.column_config.TextColumn(disabled=True),
+            },
+            key="ledger_editor",
+        )
 
-    with col_save:
-        if st.button("💾 変更を保存"):
-            try:
-                saved = storage.replace_entries(client, edited_df)
-                st.success(f"{saved} 件を保存しました。")
+        col_save, col_clear = st.columns([1, 1])
+        with col_save:
+            if st.button("💾 変更を保存"):
+                try:
+                    saved = storage.replace_entries(client, edited_df)
+                    st.success(f"{saved} 件を保存しました。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"保存に失敗しました: {e}")
+        with col_clear:
+            confirm_clear = st.checkbox("全削除を許可", key="confirm_clear")
+            if st.button("🗑 台帳を全削除", disabled=not confirm_clear):
+                storage.clear_entries(client)
                 st.rerun()
-            except Exception as e:
-                st.error(f"保存に失敗しました: {e}")
 
-    with col_csv:
-        # ダウンロードは保存済みではなく表の現在の内容から生成する
+    # --- 出力プレビュータブ ---
+    with tab_output:
+        # プレビューとCSVは編集タブの現在の内容（未保存の修正も含む）から生成する
         csv_error = None
         entries: list[JournalEntry] = []
         try:
@@ -156,21 +187,43 @@ else:
             csv_error = f"{int(idx) + 1} 行目の内容が不正です（日付は YYYY/MM/DD、金額は数値）: {e}"
 
         if csv_error:
-            st.error(csv_error)
+            st.error(csv_error + " — 編集タブで修正してください。")
         else:
+            review_left = int(edited_df["要確認"].sum())
+            if review_left:
+                st.warning(f"⚠️ 要確認が {review_left} 件残っています。出力前に編集タブで確認してください。")
+
+            dates = sorted(e.date for e in entries)
+            col1, col2, col3 = st.columns(3)
+            col1.metric("仕訳件数", f"{len(entries)} 件")
+            col2.metric("合計金額", f"¥{sum(e.amount for e in entries):,}")
+            col3.metric("期間", f"{dates[0]:%Y/%m/%d} 〜 {dates[-1]:%Y/%m/%d}")
+
+            preview_df = pd.DataFrame(
+                [
+                    {
+                        "No": i,
+                        "取引日付": e.date.strftime("%Y/%m/%d"),
+                        "借方科目": e.debit_account,
+                        "貸方科目": e.credit_account,
+                        "金額": f"{e.amount:,}",
+                        "摘要": e.description,
+                    }
+                    for i, e in enumerate(entries, start=1)
+                ]
+            ).set_index("No")
+            # st.table は全行を描画するので、ブラウザの印刷（⌘P / Ctrl+P)でそのまま印刷できる
+            st.table(preview_df)
+            st.caption("このプレビューはブラウザの印刷機能（Mac: ⌘P / Windows: Ctrl+P）でそのまま印刷できます。")
+
             if accounting_software == "弥生":
                 st.download_button(
                     "⬇️ 弥生CSVをダウンロード",
                     data=to_yayoi_csv(entries),
                     file_name=f"yayoi_{client}.csv",
                     mime="text/csv",
+                    type="primary",
                     help="弥生会計デスクトップ版の「仕訳データ」インポート形式（Shift-JIS・ヘッダなし25列）",
                 )
             else:
                 st.button("⬇️ CSVをダウンロード", disabled=True, help="現在は弥生のみ対応しています。")
-
-    with col_clear:
-        confirm_clear = st.checkbox("全削除を許可", key="confirm_clear")
-        if st.button("🗑 台帳を全削除", disabled=not confirm_clear):
-            storage.clear_entries(client)
-            st.rerun()

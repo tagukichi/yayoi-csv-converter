@@ -96,6 +96,35 @@ def test_storage_roundtrip():
         assert storage.load_entries("A建設", db_path=db).empty
 
 
+def test_client_management():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        # 初回は既定の企業が登録されている
+        assert storage.list_clients(db_path=db) == ["A建設", "B工務店", "C社"]
+
+        assert storage.add_client("D商事", db_path=db) is True
+        assert "D商事" in storage.list_clients(db_path=db)
+        # 重複・空欄は追加できない
+        assert storage.add_client("D商事", db_path=db) is False
+        assert storage.add_client("  ", db_path=db) is False
+
+        # 削除すると仕訳も消える
+        storage.add_entries(
+            "D商事",
+            [JournalEntry(date=date(2026, 4, 1), debit_account="雑費",
+                          credit_account="現金", amount=100)],
+            db_path=db,
+        )
+        storage.delete_client("D商事", db_path=db)
+        assert "D商事" not in storage.list_clients(db_path=db)
+        assert storage.load_entries("D商事", db_path=db).empty
+
+        # 既定企業を全部消しても勝手に復活しない
+        for name in ["A建設", "B工務店", "C社"]:
+            storage.delete_client(name, db_path=db)
+        assert storage.list_clients(db_path=db) == []
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -16,6 +16,9 @@ from models import JournalEntry
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "journal.db"
 
+# 初回起動時に登録する企業（後から画面で追加・削除できる）
+DEFAULT_CLIENTS = ["A建設", "B工務店", "C社"]
+
 # data_editor での表示順・編集対象の列。DB の列と一対一。
 EDITABLE_COLUMNS = [
     "取引日付", "借方勘定科目", "借方税区分", "貸方勘定科目", "貸方税区分",
@@ -40,11 +43,56 @@ CREATE TABLE IF NOT EXISTS entries (
 """
 
 
+_CREATE_CLIENTS_SQL = """
+CREATE TABLE IF NOT EXISTS clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+)
+"""
+
+
 def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(_CREATE_SQL)
+    conn.execute(_CREATE_CLIENTS_SQL)
+    # 初回のみ既定の企業を登録する（user_version を「初期化済み」フラグに使う。
+    # 全企業を削除しても勝手に復活しないようにするため）
+    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+        conn.executemany(
+            "INSERT OR IGNORE INTO clients (name) VALUES (?)",
+            [(name,) for name in DEFAULT_CLIENTS],
+        )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
     return conn
+
+
+def list_clients(db_path: Path = DB_PATH) -> list[str]:
+    """登録済みの企業名一覧を返す。"""
+    with _connect(db_path) as conn:
+        return [r[0] for r in conn.execute("SELECT name FROM clients ORDER BY name")]
+
+
+def add_client(name: str, db_path: Path = DB_PATH) -> bool:
+    """企業を追加する。空文字・重複は False を返す。"""
+    name = name.strip()
+    if not name:
+        return False
+    with _connect(db_path) as conn:
+        try:
+            conn.execute("INSERT INTO clients (name) VALUES (?)", (name,))
+        except sqlite3.IntegrityError:
+            return False
+    return True
+
+
+def delete_client(name: str, db_path: Path = DB_PATH) -> None:
+    """企業を削除する。その企業の仕訳もまとめて削除する。"""
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM entries WHERE client = ?", (name,))
+        conn.execute("DELETE FROM clients WHERE name = ?", (name,))
 
 
 def add_entries(
