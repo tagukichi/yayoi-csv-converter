@@ -92,6 +92,56 @@ def test_card_statement():
     assert result.entries[1].needs_review is True
 
 
+def test_bankbook_month_day_dates_with_year_hint():
+    """年なし日付（6-02）の通帳。見出しに年があれば補完される。"""
+    rows = [
+        _row(30, (10, "2026年6月分 取引明細")),
+        _row(80, (60, "繰越"), (300, "500,000")),
+        # 入金: 500,000 + 200,000 = 700,000
+        _row(110, (10, "6-02"), (60, "フリコミ タマケンセツ"), (220, "200,000"), (300, "700,000")),
+        # 出金: 700,000 - 3,000 = 697,000
+        _row(140, (10, "6-15"), (60, "テスウリョウ"), (150, "3,000"), (300, "697,000")),
+    ]
+    result = parse_table_document(rows, "通帳")
+    assert len(result.entries) == 2
+
+    deposit = result.entries[0]
+    assert deposit.date == date(2026, 6, 2)  # 見出しの「2026年」から補完
+    assert deposit.debit_account == "普通預金"
+    assert deposit.credit_account == "売掛金"  # 「フリコミ」から推定
+    assert deposit.needs_review is False  # 年が特定でき、残高も一致
+
+    withdraw = result.entries[1]
+    assert withdraw.date == date(2026, 6, 15)
+    assert withdraw.debit_account == "支払手数料"  # 「テスウリョウ」から推定
+
+
+def test_bankbook_month_day_without_year_hint():
+    """年の記載が一切ない場合は本年と仮定し、要確認＋警告になる。"""
+    rows = [
+        _row(80, (60, "繰越"), (300, "500,000")),
+        _row(110, (10, "6-02"), (60, "フリコミ タマケンセツ"), (220, "200,000"), (300, "700,000")),
+    ]
+    result = parse_table_document(rows, "通帳")
+    assert len(result.entries) == 1
+    assert result.entries[0].date.month == 6
+    assert result.entries[0].needs_review is True  # 年を仮定したため
+    assert any("年を特定できなかった" in w for w in result.warnings)
+
+
+def test_bankbook_year_rollover():
+    """12月→1月の年またぎで年が進む。"""
+    rows = [
+        _row(30, (10, "2026年12月")),
+        _row(80, (60, "繰越"), (300, "100,000")),
+        _row(110, (10, "12-28"), (60, "フリコミ A"), (220, "50,000"), (300, "150,000")),
+        _row(140, (10, "1-05"), (60, "フリコミ B"), (220, "10,000"), (300, "160,000")),
+    ]
+    result = parse_table_document(rows, "通帳")
+    assert result.entries[0].date == date(2026, 12, 28)
+    assert result.entries[1].date == date(2027, 1, 5)
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):

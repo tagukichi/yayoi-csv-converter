@@ -147,6 +147,13 @@ def parse_document(lines: list[str], document_type: str, source_name: str = "") 
 
 # 通帳の日付セル: 08-04-01（和暦の令和8年）/ 2026-04-01 / 8.4.1 など
 _CELL_DATE_PATTERN = re.compile(r"^(\d{1,4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$")
+# 年なしの日付セル: 6-02 / 6/2 / 6月2日 など（年は文書内の別の記載や前後の行から補う）
+_CELL_MONTH_DAY_PATTERN = re.compile(r"^(\d{1,2})[-/.月](\d{1,2})日?$")
+# 表以外の場所（見出し等）から年を拾うためのパターン
+_YEAR_HINT_PATTERNS = [
+    re.compile(r"(20\d{2})\s*年"),
+    re.compile(r"令和\s*(\d{1,2})\s*年"),
+]
 
 
 def _parse_cell_date(text: str) -> date | None:
@@ -182,23 +189,82 @@ def _parse_cell_amount(text: str) -> int | None:
     return value
 
 
-def _split_row(cells: list[OcrLine]) -> tuple[date | None, str, list[tuple[int, float]]]:
-    """表の1行を (日付, 摘要, [(金額, X座標), ...]) に分解する。"""
+def _split_row(
+    cells: list[OcrLine],
+) -> tuple[date | None, tuple[int, int] | None, str, list[tuple[int, float]]]:
+    """表の1行を (完全な日付, 年なしの(月,日), 摘要, [(金額, X座標), ...]) に分解する。"""
     row_date = None
+    month_day = None
     desc_parts: list[str] = []
     amounts: list[tuple[int, float]] = []
     for cell in cells:
+        text = cell.text.strip()
         if row_date is None:
-            d = _parse_cell_date(cell.text)
+            d = _parse_cell_date(text)
             if d:
                 row_date = d
                 continue
-        a = _parse_cell_amount(cell.text)
+        if row_date is None and month_day is None:
+            m = _CELL_MONTH_DAY_PATTERN.match(text)
+            if m:
+                mo, d = int(m.group(1)), int(m.group(2))
+                if 1 <= mo <= 12 and 1 <= d <= 31:
+                    month_day = (mo, d)
+                    continue
+        a = _parse_cell_amount(text)
         if a is not None:
             amounts.append((a, cell.x))
         else:
-            desc_parts.append(cell.text.strip())
-    return row_date, " ".join(p for p in desc_parts if p), amounts
+            desc_parts.append(text)
+    return row_date, month_day, " ".join(p for p in desc_parts if p), amounts
+
+
+def _find_year_hint(rows: list[list[OcrLine]]) -> int | None:
+    """書類のどこか（見出し・完全な日付セルなど）から年を拾う。"""
+    for cells in rows:
+        for cell in cells:
+            d = _parse_cell_date(cell.text.strip())
+            if d:
+                return d.year
+            for i, pat in enumerate(_YEAR_HINT_PATTERNS):
+                m = pat.search(cell.text)
+                if m:
+                    year = int(m.group(1))
+                    return year + 2018 if i == 1 else year  # 令和 → 西暦
+    return None
+
+
+class _RowDateResolver:
+    """年なし日付（6-02 等）に年を補い、年またぎ（12月→1月）も追跡する。"""
+
+    def __init__(self, rows: list[list[OcrLine]], result: ParseResult):
+        self.year = _find_year_hint(rows)
+        self.assumed = self.year is None
+        if self.assumed:
+            self.year = date.today().year
+            result.warnings.append(
+                "書類から年を特定できなかったため、年なしの日付は本年"
+                f"（{self.year}年）と仮定しました。取引日付を確認してください。"
+            )
+        self.last_month: int | None = None
+
+    def resolve(self, full_date: date | None, month_day: tuple[int, int] | None) -> tuple[date | None, bool]:
+        """行の日付を確定する。戻り値: (日付, 年を仮定したか)。"""
+        if full_date is not None:
+            self.year = full_date.year
+            self.last_month = full_date.month
+            return full_date, False
+        if month_day is None:
+            return None, False
+        mo, d = month_day
+        # 月が大きく戻ったら年またぎ（12月→1月など）とみなす
+        if self.last_month is not None and self.last_month - mo >= 6:
+            self.year += 1
+        self.last_month = mo
+        try:
+            return date(self.year, mo, d), self.assumed
+        except ValueError:
+            return None, False
 
 
 def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
@@ -209,12 +275,14 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
     """
     prev_balance: int | None = None
     last_date: date | None = None
+    resolver = _RowDateResolver(rows, result)
     # 残高チェックで確定できた列位置を覚えて、チェック不能行の判定に使う
     withdraw_xs: list[float] = []
     deposit_xs: list[float] = []
 
     for cells in rows:
-        row_date, desc, amounts = _split_row(cells)
+        full_date, month_day, desc, amounts = _split_row(cells)
+        row_date, year_assumed = resolver.resolve(full_date, month_day)
         if not amounts:
             continue  # 見出し行・摘要のみの行
 
@@ -236,8 +304,8 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
             continue
         last_date = entry_date
 
-        needs_review = False
-        note = ""
+        needs_review = year_assumed  # 年を仮定した行は日付の確認が必要
+        note = "年を仮定（書類に年の記載なし）" if year_assumed else ""
         if prev_balance is not None and prev_balance + movement == balance:
             is_deposit = True
             deposit_xs.append(movement_x)
@@ -287,8 +355,10 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
 
 def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
     """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。"""
+    resolver = _RowDateResolver(rows, result)
     for cells in rows:
-        row_date, desc, amounts = _split_row(cells)
+        full_date, month_day, desc, amounts = _split_row(cells)
+        row_date, year_assumed = resolver.resolve(full_date, month_day)
         if row_date is None or not amounts:
             continue  # 見出し・合計行など
         amount = amounts[-1][0]
@@ -300,7 +370,8 @@ def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
                 credit_account=CARD_CREDIT_ACCOUNT,
                 amount=amount,
                 description=desc,
-                needs_review=unknown,
+                needs_review=unknown or year_assumed,
+                note="年を仮定（書類に年の記載なし）" if year_assumed else "",
             )
         )
 
