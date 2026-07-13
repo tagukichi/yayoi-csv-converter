@@ -16,6 +16,7 @@ from datetime import date
 from accounts import (
     estimate_expense_account,
     estimate_income_account,
+    yayoi_tax,
 )
 from models import JournalEntry, ParseResult
 from ocr import OcrLine
@@ -134,14 +135,17 @@ def parse_document(lines: list[str], document_type: str, source_name: str = "") 
 
     text = " ".join(lines)
     debit_account, _ = estimate_expense_account(text)
+    credit_account = CREDIT_ACCOUNT_BY_DOC_TYPE[document_type]
 
     result.entries.append(
         JournalEntry(
             date=found_date,
             debit_account=debit_account,
-            credit_account=CREDIT_ACCOUNT_BY_DOC_TYPE[document_type],
+            credit_account=credit_account,
             amount=total,
             description=source_name or document_type,
+            debit_tax=yayoi_tax(debit_account),
+            credit_tax=yayoi_tax(credit_account),
             # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
             needs_review=True,
             note="暫定解析（合計金額ベース）",
@@ -337,27 +341,23 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
 
         if is_deposit:
             account, unknown = estimate_income_account(desc)
-            entry = JournalEntry(
-                date=entry_date,
-                debit_account=BANK_ACCOUNT,
-                credit_account=account,
-                amount=movement,
-                description=desc,
-                needs_review=needs_review or unknown,
-                note=note,
-            )
+            debit_account, credit_account = BANK_ACCOUNT, account
         else:
             account, unknown = estimate_expense_account(desc)
-            entry = JournalEntry(
+            debit_account, credit_account = account, BANK_ACCOUNT
+        result.entries.append(
+            JournalEntry(
                 date=entry_date,
-                debit_account=account,
-                credit_account=BANK_ACCOUNT,
+                debit_account=debit_account,
+                credit_account=credit_account,
                 amount=movement,
                 description=desc,
+                debit_tax=yayoi_tax(debit_account),
+                credit_tax=yayoi_tax(credit_account),
                 needs_review=needs_review or unknown,
                 note=note,
             )
-        result.entries.append(entry)
+        )
 
 
 def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
@@ -377,6 +377,8 @@ def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
                 credit_account=CARD_CREDIT_ACCOUNT,
                 amount=amount,
                 description=desc,
+                debit_tax=yayoi_tax(account),
+                credit_tax=yayoi_tax(CARD_CREDIT_ACCOUNT),
                 needs_review=unknown or year_assumed,
                 note="年を仮定（書類に年の記載なし）" if year_assumed else "",
             )

@@ -113,7 +113,9 @@ def test_bankbook_month_day_dates_with_year_hint():
 
     withdraw = result.entries[1]
     assert withdraw.date == date(2026, 6, 15)
-    assert withdraw.debit_account == "支払手数料"  # 「テスウリョウ」から推定
+    assert withdraw.debit_account == "手数料"  # 「テスウリョウ」から推定（事務所の科目名）
+    assert withdraw.debit_tax == "課対仕入込10%"
+    assert withdraw.credit_tax == "対象外"  # 普通預金
 
 
 def test_bankbook_month_day_without_year_hint():
