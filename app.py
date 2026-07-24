@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -12,7 +13,43 @@ from yayoi_exporter import to_yayoi_csv
 
 load_dotenv()
 
+# Streamlit Community Cloud 等では認証情報を st.secrets で渡す。ocr.py /
+# storage.py は os.getenv で読むため、secrets を環境変数へ橋渡しする
+# （ローカルの .env が優先されるよう setdefault を使う）。
+try:
+    for _k, _v in dict(st.secrets).items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass  # secrets 未設定（ローカル開発）なら何もしない
+
 st.set_page_config(page_title="PDF → 弥生CSV 変換ツール", page_icon="📄", layout="wide")
+
+
+def _check_password() -> bool:
+    """APP_PASSWORD が設定されている場合のみパスワード認証を要求する。
+
+    未設定（ローカル開発）なら常に通す。公開デプロイ時に secrets へ
+    APP_PASSWORD を入れると、URL を知る人全員が使えてしまうのを防げる。
+    """
+    expected = os.getenv("APP_PASSWORD")
+    if not expected:
+        return True
+    if st.session_state.get("authed"):
+        return True
+    st.title("PDF → 弥生CSV 変換ツール")
+    pw = st.text_input("パスワードを入力してください", type="password")
+    if pw:
+        if pw == expected:
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います。")
+    return False
+
+
+if not _check_password():
+    st.stop()
 
 st.title("PDF → 弥生CSV 変換ツール")
 
