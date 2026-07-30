@@ -97,6 +97,28 @@ def test_receipt_store_name_as_description():
     assert result2.entries[0].description == "IMG_5678.jpg"
 
 
+def test_source_file_management():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+
+        def entry(desc):
+            return JournalEntry(date=date(2026, 6, 1), debit_account="雑費",
+                                credit_account="現金", amount=100, description=desc)
+
+        storage.add_entries("A建設", [entry("a1"), entry("a2")], source_file="通帳6月.pdf", db_path=db)
+        storage.add_entries("A建設", [entry("b1")], source_file="レシート.jpg", db_path=db)
+        storage.add_entries("B工務店", [entry("c1")], source_file="通帳6月.pdf", db_path=db)
+
+        files = dict(storage.list_source_files("A建設", db_path=db))
+        assert files == {"通帳6月.pdf": 2, "レシート.jpg": 1}
+
+        # ファイル単位の削除は対象クライアント・対象ファイルだけに効く
+        deleted = storage.delete_entries_by_source("A建設", "通帳6月.pdf", db_path=db)
+        assert deleted == 2
+        assert dict(storage.list_source_files("A建設", db_path=db)) == {"レシート.jpg": 1}
+        assert len(storage.load_entries("B工務店", db_path=db)) == 1
+
+
 def test_account_rules_storage():
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "test.db"

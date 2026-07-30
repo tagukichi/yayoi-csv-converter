@@ -312,6 +312,43 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
     return len(rows)
 
 
+def list_source_files(client: str, db_path: Path = DB_PATH) -> list[tuple[str, int]]:
+    """クライアントの台帳にある出典ファイル名と件数を返す（新しい順）。"""
+    if _supabase_enabled(db_path):
+        res = (
+            _sb().table("entries").select("source_file")
+            .eq("client", client).neq("source_file", "").order("id", desc=True).execute()
+        )
+        counts: dict[str, int] = {}
+        for r in res.data:
+            counts[r["source_file"]] = counts.get(r["source_file"], 0) + 1
+        return list(counts.items())
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT source_file, COUNT(*) FROM entries
+               WHERE client = ? AND source_file != ''
+               GROUP BY source_file ORDER BY MAX(id) DESC""",
+            (client,),
+        ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def delete_entries_by_source(client: str, source_file: str, db_path: Path = DB_PATH) -> int:
+    """指定した出典ファイル由来の仕訳をまとめて削除する。削除件数を返す。"""
+    if _supabase_enabled(db_path):
+        res = (
+            _sb().table("entries").delete()
+            .eq("client", client).eq("source_file", source_file).execute()
+        )
+        return len(res.data or [])
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM entries WHERE client = ? AND source_file = ?",
+            (client, source_file),
+        )
+        return cur.rowcount
+
+
 def list_account_rules(db_path: Path = DB_PATH) -> list[dict]:
     """学習済みの科目ルール一覧を返す（新しい順）。"""
     if _supabase_enabled(db_path):

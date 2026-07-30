@@ -111,11 +111,14 @@ with st.expander("📖 使い方", expanded=True):
            - 修正したら **「💾 変更を保存」** をクリックします
         5. **「🖨 出力プレビュー」** タブで件数・合計金額を確認し、
            **「⬇️ 弥生CSVをダウンロード」** をクリックします
+           - **期間（月）で絞って**出力できます
            - このタブはブラウザの印刷機能（Mac: ⌘P / Windows: Ctrl+P）でそのまま印刷できます
 
         ダウンロードしたCSVを弥生会計の「仕訳データのインポート」から取り込んでください。
         仕訳はクライアント企業ごとに蓄積されるので、書類を数回に分けてアップロードし、
         最後にまとめてCSVを出力することもできます。
+        **同じ名前のファイルを2回アップロードしても重複しないよう自動でスキップ**されます。
+        間違えて取り込んだ場合は、編集タブの「🗂 ファイル単位で取り込みを取り消す」から戻せます。
         """
     )
 
@@ -180,6 +183,14 @@ uploaded_files = st.file_uploader(
     help="PDF・PNG・JPG・XLSX に対応しています。スマートフォンで撮影した領収書の写真も使えます。",
 )
 
+# 同じファイルを2回アップロードして仕訳が重複する事故を防ぐ。
+# 意図的に再取り込みしたい場合のみチェックを入れてもらう
+reimport_ok = st.checkbox(
+    "取り込み済みと同名のファイルも再度取り込む（仕訳が重複します）",
+    value=False,
+    key="reimport_ok",
+)
+
 if st.button("変換を開始", type="primary"):
     if not uploaded_files:
         st.warning("ファイルをアップロードしてください。")
@@ -190,7 +201,16 @@ if st.button("変換を開始", type="primary"):
         _rules = storage.list_account_rules()
         learned_expense = [(r["keyword"], r["account"]) for r in _rules if r["side"] == "expense"]
         learned_income = [(r["keyword"], r["account"]) for r in _rules if r["side"] == "income"]
+        # 取り込み済みファイル名（二重取り込みチェック用。OCRを呼ぶ前に判定する）
+        imported_names = {name for name, _cnt in storage.list_source_files(client)}
         for i, f in enumerate(uploaded_files):
+            if f.name in imported_names and not reimport_ok:
+                st.warning(
+                    f"⏭ 「{f.name}」は取り込み済みのためスキップしました。"
+                    "再度取り込む場合は、アップロード欄の下のチェックを入れてから実行してください。"
+                )
+                progress.progress((i + 1) / len(uploaded_files))
+                continue
             with st.expander(f"📄 {f.name}", expanded=False):
                 try:
                     if f.name.lower().endswith(".xlsx"):
@@ -358,13 +378,48 @@ else:
                         storage.delete_account_rule(rule["id"])
                         st.rerun()
 
+        # --- ファイル単位の取り消し ---
+        with st.expander("🗂 ファイル単位で取り込みを取り消す"):
+            st.caption("書類タイプの選び間違いなどで取り込んだ仕訳を、ファイルごとまとめて削除します。")
+            source_files = storage.list_source_files(client)
+            if not source_files:
+                st.caption("ファイル由来の仕訳はありません。")
+            else:
+                options = [f"{name}（{count}件）" for name, count in source_files]
+                selected = st.selectbox("取り消すファイル", options, key="undo_file_select")
+                selected_name = source_files[options.index(selected)][0]
+                confirm_undo = st.checkbox(
+                    f"「{selected_name}」由来の仕訳をすべて削除する",
+                    key="undo_file_confirm",
+                )
+                if st.button("取り込みを取り消す", disabled=not confirm_undo, key="undo_file_btn"):
+                    deleted = storage.delete_entries_by_source(client, selected_name)
+                    st.session_state["flash"] = f"「{selected_name}」の仕訳 {deleted} 件を削除しました。"
+                    st.rerun()
+
     # --- 出力プレビュータブ ---
     with tab_output:
+        # 期間（年月）で絞り込んで出力できるようにする（経理の月次業務向け）
+        months = sorted(
+            {str(d)[:7] for d in edited_df["取引日付"] if len(str(d)) >= 7},
+            reverse=True,
+        )
+        period = st.selectbox(
+            "出力する期間",
+            ["すべて"] + months,
+            key="output_period",
+            help="月を選ぶと、その月の仕訳だけをプレビュー・CSV出力します。",
+        )
+        if period == "すべて":
+            target_df = edited_df
+        else:
+            target_df = edited_df[edited_df["取引日付"].astype(str).str.startswith(period)]
+
         # プレビューとCSVは編集タブの現在の内容（未保存の修正も含む）から生成する
         csv_error = None
         entries: list[JournalEntry] = []
         try:
-            for idx, row in edited_df.iterrows():
+            for idx, row in target_df.iterrows():
                 entries.append(
                     JournalEntry(
                         date=datetime.strptime(str(row["取引日付"]).strip(), "%Y/%m/%d").date(),
@@ -381,8 +436,10 @@ else:
 
         if csv_error:
             st.error(csv_error + " — 編集タブで修正してください。")
+        elif not entries:
+            st.info("選択した期間に仕訳がありません。")
         else:
-            review_left = int(edited_df["要確認"].sum())
+            review_left = int(target_df["要確認"].sum())
             if review_left:
                 st.warning(f"⚠️ 要確認が {review_left} 件残っています。出力前に編集タブで確認してください。")
 
@@ -409,11 +466,12 @@ else:
             st.table(preview_df)
             st.caption("このプレビューはブラウザの印刷機能（Mac: ⌘P / Windows: Ctrl+P）でそのまま印刷できます。")
 
+            csv_suffix = "" if period == "すべて" else "_" + period.replace("/", "")
             if accounting_software == "弥生":
                 st.download_button(
                     "⬇️ 弥生CSVをダウンロード",
                     data=to_yayoi_csv(entries),
-                    file_name=f"yayoi_{client}.csv",
+                    file_name=f"yayoi_{client}{csv_suffix}.csv",
                     mime="text/csv",
                     type="primary",
                     help="弥生会計デスクトップ版の「仕訳データ」インポート形式（Shift-JIS・ヘッダなし25列）",
