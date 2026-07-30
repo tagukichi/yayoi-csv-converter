@@ -97,6 +97,41 @@ def test_receipt_store_name_as_description():
     assert result2.entries[0].description == "IMG_5678.jpg"
 
 
+def test_account_rules_storage():
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        assert storage.list_account_rules(db_path=db) == []
+        assert storage.add_account_rule("タイムズ", "旅費交通費", db_path=db) is True
+        assert storage.add_account_rule("", "旅費交通費", db_path=db) is False
+
+        rules = storage.list_account_rules(db_path=db)
+        assert len(rules) == 1
+        assert rules[0]["keyword"] == "タイムズ"
+        assert rules[0]["side"] == "expense"
+
+        # 同じキーワードは上書き（重複しない）
+        assert storage.add_account_rule("タイムズ", "車輌費", db_path=db) is True
+        rules = storage.list_account_rules(db_path=db)
+        assert len(rules) == 1
+        assert rules[0]["account"] == "車輌費"
+
+        storage.delete_account_rule(rules[0]["id"], db_path=db)
+        assert storage.list_account_rules(db_path=db) == []
+
+
+def test_custom_rules_priority():
+    from accounts import estimate_expense_account, estimate_income_account
+
+    # 学習ルールは組み込みルールより優先される
+    account, review = estimate_expense_account("ETC利用料", [("ETC", "車輌費")])
+    assert (account, review) == ("車輌費", False)
+    # 組み込みで推定できない摘要も学習ルールで確定できる
+    account, review = estimate_expense_account("謎の店", [("謎の店", "会議費")])
+    assert (account, review) == ("会議費", False)
+    account, review = estimate_income_account("フリコミ タマケンセツ", [("タマケンセツ", "売上高")])
+    assert (account, review) == ("売上高", False)
+
+
 def test_detect_document_type():
     from parser import detect_document_type
 

@@ -159,7 +159,12 @@ def _find_total(lines: list[str]) -> int | None:
     return None
 
 
-def parse_document(lines: list[str], document_type: str, source_name: str = "") -> ParseResult:
+def parse_document(
+    lines: list[str],
+    document_type: str,
+    source_name: str = "",
+    custom_expense_rules: list[tuple[str, str]] | None = None,
+) -> ParseResult:
     """OCRテキスト行を書類タイプに応じて仕訳データに変換する。"""
     result = ParseResult()
 
@@ -185,7 +190,7 @@ def parse_document(lines: list[str], document_type: str, source_name: str = "") 
         )
 
     text = " ".join(lines)
-    debit_account, _ = estimate_expense_account(text)
+    debit_account, _ = estimate_expense_account(text, custom_expense_rules)
     credit_account = CREDIT_ACCOUNT_BY_DOC_TYPE[document_type]
 
     # 摘要はOCRから拾った店舗名を優先し、取れなければファイル名で代用
@@ -375,7 +380,12 @@ class _RowDateResolver:
             return None, False
 
 
-def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
+def _parse_bankbook(
+    rows: list[list[OcrLine]],
+    result: ParseResult,
+    custom_expense_rules: list[tuple[str, str]] | None = None,
+    custom_income_rules: list[tuple[str, str]] | None = None,
+) -> None:
     """通帳の明細を解析する。
 
     各行の一番右の金額を「残高」、その左を「入出金額」とみなし、
@@ -437,10 +447,10 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
         prev_balance = balance
 
         if is_deposit:
-            account, unknown = estimate_income_account(desc)
+            account, unknown = estimate_income_account(desc, custom_income_rules)
             debit_account, credit_account = BANK_ACCOUNT, account
         else:
-            account, unknown = estimate_expense_account(desc)
+            account, unknown = estimate_expense_account(desc, custom_expense_rules)
             debit_account, credit_account = account, BANK_ACCOUNT
         result.entries.append(
             JournalEntry(
@@ -472,7 +482,11 @@ def _clean_card_description(desc: str) -> str:
     return " ".join(tokens)
 
 
-def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
+def _parse_card(
+    rows: list[list[OcrLine]],
+    result: ParseResult,
+    custom_expense_rules: list[tuple[str, str]] | None = None,
+) -> None:
     """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。
 
     行には「利用金額」と「手数料」（1回払いなら0円）の複数の金額が並ぶことが
@@ -491,7 +505,7 @@ def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
             continue  # 利用額0円の行（手数料のみ等）は取引にしない
         amount = max(non_zero)
         desc = _clean_card_description(desc)
-        account, unknown = estimate_expense_account(desc)
+        account, unknown = estimate_expense_account(desc, custom_expense_rules)
         result.entries.append(
             JournalEntry(
                 date=row_date,
@@ -512,14 +526,18 @@ def _mean(values: list[float]) -> float:
 
 
 def parse_table_document(
-    rows: list[list[OcrLine]], document_type: str, source_name: str = ""
+    rows: list[list[OcrLine]],
+    document_type: str,
+    source_name: str = "",
+    custom_expense_rules: list[tuple[str, str]] | None = None,
+    custom_income_rules: list[tuple[str, str]] | None = None,
 ) -> ParseResult:
     """座標で復元した表の行から、通帳・カード明細の仕訳を起こす。"""
     result = ParseResult()
     if document_type == "通帳":
-        _parse_bankbook(rows, result)
+        _parse_bankbook(rows, result, custom_expense_rules, custom_income_rules)
     elif document_type == "カード明細":
-        _parse_card(rows, result)
+        _parse_card(rows, result, custom_expense_rules)
     else:
         result.warnings.append(f"書類タイプ「{document_type}」は表形式解析の対象外です。")
         return result

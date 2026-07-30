@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import storage
 from models import JournalEntry
 from ocr import AzureOCRError, credentials_available, group_rows, run_ocr_lines
+from accounts import yayoi_tax
 from parser import detect_document_type, parse_document, parse_table_document
 from yayoi_exporter import to_yayoi_csv
 
@@ -185,6 +186,10 @@ if st.button("変換を開始", type="primary"):
     else:
         progress = st.progress(0.0)
         added_total = 0
+        # 一括置換から学習したルール（組み込みルールより優先して科目を決める）
+        _rules = storage.list_account_rules()
+        learned_expense = [(r["keyword"], r["account"]) for r in _rules if r["side"] == "expense"]
+        learned_income = [(r["keyword"], r["account"]) for r in _rules if r["side"] == "income"]
         for i, f in enumerate(uploaded_files):
             with st.expander(f"📄 {f.name}", expanded=False):
                 try:
@@ -211,12 +216,19 @@ if st.button("変換を開始", type="primary"):
                         if effective_type in ("通帳", "カード明細"):
                             # 座標で表の行を復元してから解析する
                             rows = group_rows(ocr_lines)
-                            result = parse_table_document(rows, effective_type, source_name=f.name)
+                            result = parse_table_document(
+                                rows, effective_type, source_name=f.name,
+                                custom_expense_rules=learned_expense,
+                                custom_income_rules=learned_income,
+                            )
                             preview = "\n".join(
                                 " | ".join(c.text for c in row) for row in rows
                             )
                         else:
-                            result = parse_document(texts, effective_type, source_name=f.name)
+                            result = parse_document(
+                                texts, effective_type, source_name=f.name,
+                                custom_expense_rules=learned_expense,
+                            )
                             preview = "\n".join(texts)
                         for w in result.warnings:
                             st.warning(w)
@@ -251,6 +263,8 @@ else:
 
     # --- 編集タブ ---
     with tab_edit:
+        if flash := st.session_state.pop("flash", None):
+            st.success(flash)
         review_count = int(df["要確認"].sum())
         if review_count:
             st.warning(f"⚠️ 要確認の仕訳が {review_count} 件あります。内容を確認し、修正したらチェックを外してください。")
@@ -289,6 +303,60 @@ else:
             if st.button("🗑 台帳を全削除", disabled=not confirm_clear):
                 storage.clear_entries(client)
                 st.rerun()
+
+        # --- 科目の一括置換（学習機能付き） ---
+        with st.expander("🔁 科目の一括置換（次回からの自動適用も学習できます）"):
+            st.caption("摘要にキーワードを含む行の勘定科目をまとめて変更します。税区分も新しい科目に合わせて更新されます。")
+            col_kw, col_side, col_acct = st.columns([2, 1, 2])
+            bulk_keyword = col_kw.text_input("摘要に含まれるキーワード", key="bulk_keyword",
+                                             placeholder="例: タイムズ")
+            bulk_side = col_side.radio("変更する列", ["借方", "貸方"], key="bulk_side",
+                                       help="経費の科目は借方、通帳の入金の科目は貸方です")
+            bulk_account = col_acct.text_input("変更後の勘定科目", key="bulk_account",
+                                               placeholder="例: 旅費交通費")
+            bulk_clear_review = st.checkbox("変更した行の「要確認」を解除する", value=True, key="bulk_clear_review")
+            bulk_learn = st.checkbox("このルールを学習し、次回の変換から自動で適用する", value=True, key="bulk_learn")
+
+            if st.button("一括置換を実行", key="bulk_apply"):
+                keyword, account = bulk_keyword.strip(), bulk_account.strip()
+                if not keyword or not account:
+                    st.error("キーワードと変更後の勘定科目を入力してください。")
+                else:
+                    target_col = "借方勘定科目" if bulk_side == "借方" else "貸方勘定科目"
+                    tax_col = "借方税区分" if bulk_side == "借方" else "貸方税区分"
+                    updated = edited_df.copy()
+                    mask = updated["摘要"].astype(str).str.contains(keyword, case=False, regex=False)
+                    count = int(mask.sum())
+                    if count == 0:
+                        st.warning(f"摘要に「{keyword}」を含む行はありません。")
+                    else:
+                        updated.loc[mask, target_col] = account
+                        updated.loc[mask, tax_col] = yayoi_tax(account)
+                        if bulk_clear_review:
+                            updated.loc[mask, "要確認"] = False
+                        storage.replace_entries(client, updated)
+                        message = f"{count} 件の{target_col}を「{account}」に変更しました。"
+                        if bulk_learn:
+                            storage.add_account_rule(
+                                keyword, account,
+                                side="expense" if bulk_side == "借方" else "income",
+                            )
+                            message += " ルールを学習しました（次回の変換から自動適用）。"
+                        st.session_state["flash"] = message
+                        st.rerun()
+
+            learned_rules = storage.list_account_rules()
+            if learned_rules:
+                st.divider()
+                st.caption(f"🧠 学習済みルール（{len(learned_rules)}件）— 変換時に自動で科目が付きます:")
+                for rule in learned_rules:
+                    col_r1, col_r2, col_r3 = st.columns([3, 2, 1])
+                    col_r1.write(f"摘要に「{rule['keyword']}」")
+                    side_label = "借方" if rule["side"] == "expense" else "貸方"
+                    col_r2.write(f"→ {side_label}: {rule['account']}")
+                    if col_r3.button("削除", key=f"rule_del_{rule['id']}"):
+                        storage.delete_account_rule(rule["id"])
+                        st.rerun()
 
     # --- 出力プレビュータブ ---
     with tab_output:

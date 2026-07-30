@@ -27,3 +27,14 @@ create table if not exists entries (
 );
 
 create index if not exists entries_client_idx on entries (client, date);
+
+-- 一括置換から学習した「摘要キーワード → 勘定科目」ルール
+-- side: expense=借方（費用）, income=貸方（収益）
+create table if not exists account_rules (
+  id bigint generated always as identity primary key,
+  keyword text not null,
+  account text not null,
+  side text not null default 'expense',
+  created_at timestamptz not null default now(),
+  unique (keyword, side)
+);

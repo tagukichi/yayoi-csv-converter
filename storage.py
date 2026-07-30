@@ -55,6 +55,19 @@ CREATE TABLE IF NOT EXISTS clients (
 )
 """
 
+# 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
+# side: expense=借方（費用）, income=貸方（収益）
+_CREATE_RULES_SQL = """
+CREATE TABLE IF NOT EXISTS account_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    account TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'expense',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (keyword, side)
+)
+"""
+
 # --- Supabase バックエンド ---
 
 _sb_client = None
@@ -140,6 +153,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute(_CREATE_SQL)
     conn.execute(_CREATE_CLIENTS_SQL)
+    conn.execute(_CREATE_RULES_SQL)
     # 初回のみ既定の企業を登録する（user_version を「初期化済み」フラグに使う。
     # 全企業を削除しても勝手に復活しないようにするため）
     if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
@@ -296,6 +310,49 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
             rows,
         )
     return len(rows)
+
+
+def list_account_rules(db_path: Path = DB_PATH) -> list[dict]:
+    """学習済みの科目ルール一覧を返す（新しい順）。"""
+    if _supabase_enabled(db_path):
+        res = _sb().table("account_rules").select("*").order("id", desc=True).execute()
+        return res.data
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, keyword, account, side FROM account_rules ORDER BY id DESC"
+        ).fetchall()
+    return [{"id": r[0], "keyword": r[1], "account": r[2], "side": r[3]} for r in rows]
+
+
+def add_account_rule(
+    keyword: str, account: str, side: str = "expense", db_path: Path = DB_PATH
+) -> bool:
+    """科目ルールを学習する。同じキーワード・側があれば科目を上書きする。"""
+    keyword, account = keyword.strip(), account.strip()
+    if not keyword or not account or side not in ("expense", "income"):
+        return False
+    if _supabase_enabled(db_path):
+        _sb().table("account_rules").upsert(
+            {"keyword": keyword, "account": account, "side": side},
+            on_conflict="keyword,side",
+        ).execute()
+        return True
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO account_rules (keyword, account, side) VALUES (?, ?, ?)
+               ON CONFLICT (keyword, side) DO UPDATE SET account = excluded.account""",
+            (keyword, account, side),
+        )
+    return True
+
+
+def delete_account_rule(rule_id: int, db_path: Path = DB_PATH) -> None:
+    """学習済みの科目ルールを削除する。"""
+    if _supabase_enabled(db_path):
+        _sb().table("account_rules").delete().eq("id", rule_id).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM account_rules WHERE id = ?", (rule_id,))
 
 
 def clear_entries(client: str, db_path: Path = DB_PATH) -> None:

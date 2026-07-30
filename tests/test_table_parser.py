@@ -132,6 +132,18 @@ def test_card_statement_fee_column_and_noise():
     assert result.entries[1].debit_account == "交際接待費"
 
 
+def test_card_statement_with_learned_rule():
+    """学習ルールがあれば「謎の店」も要確認にならず科目が付く。"""
+    rows = [
+        _row(80, (10, "2026/04/05"), (60, "謎の店"), (200, "3,000")),
+    ]
+    result = parse_table_document(
+        rows, "カード明細", custom_expense_rules=[("謎の店", "会議費")]
+    )
+    assert result.entries[0].debit_account == "会議費"
+    assert result.entries[0].needs_review is False
+
+
 def test_card_statement_skips_summary_rows():
     """日付付きの合計・請求サマリ行は仕訳にしない。"""
     rows = [

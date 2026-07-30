@@ -69,23 +69,40 @@ def _match(description: str, rules: list[tuple[list[str], str]]) -> str | None:
     return None
 
 
-def estimate_expense_account(description: str) -> tuple[str, bool]:
+def _match_custom(description: str, custom_rules: list[tuple[str, str]] | None) -> str | None:
+    """画面から学習したルール（キーワード, 科目）を組み込みルールより優先して照合する。"""
+    if not custom_rules:
+        return None
+    text = description.lower()
+    for keyword, account in custom_rules:
+        if keyword.lower() in text:
+            return account
+    return None
+
+
+def estimate_expense_account(
+    description: str, custom_rules: list[tuple[str, str]] | None = None
+) -> tuple[str, bool]:
     """出金（費用）側の勘定科目を推定する。
 
+    custom_rules（学習済みルール）があれば組み込みルールより優先する。
     戻り値: (勘定科目, needs_review)。推定できなければ既定科目と True を返す。
     """
-    account = _match(description, EXPENSE_RULES)
+    account = _match_custom(description, custom_rules) or _match(description, EXPENSE_RULES)
     if account is None:
         return UNKNOWN_EXPENSE, True
     return account, False
 
 
-def estimate_income_account(description: str) -> tuple[str, bool]:
+def estimate_income_account(
+    description: str, custom_rules: list[tuple[str, str]] | None = None
+) -> tuple[str, bool]:
     """入金（収益・債権回収）側の勘定科目を推定する。
 
+    custom_rules（学習済みルール）があれば組み込みルールより優先する。
     戻り値: (勘定科目, needs_review)。推定できなければ既定科目と True を返す。
     """
-    account = _match(description, INCOME_RULES)
+    account = _match_custom(description, custom_rules) or _match(description, INCOME_RULES)
     if account is None:
         return UNKNOWN_INCOME, True
     return account, False
