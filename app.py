@@ -53,6 +53,71 @@ if not _check_password():
 
 st.title("PDF → 弥生CSV 変換ツール")
 
+# Streamlit 組み込みのファイルアップローダは表示文言が英語で、翻訳する仕組みが
+# 提供されていないため、CSS の ::after で日本語ラベルを重ねて置き換える。
+st.markdown(
+    """
+    <style>
+    /* 案内文（"Drag and drop files here" と "Limit 200MB per file • ..."）は
+       アイコン span の隣の div の中に span 2つで入っている。両方隠して
+       ::before / ::after で日本語を出す。 */
+    [data-testid="stFileUploaderDropzoneInstructions"] > div > span {
+        display: none;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] > div::before {
+        content: "ここにファイルをドラッグ＆ドロップ";
+        font-weight: 600;
+        display: block;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+        content: "1ファイル200MBまで ・ PDF / PNG / JPG / XLSX に対応";
+        font-size: 0.8rem;
+        opacity: 0.6;
+        display: block;
+        margin-top: 0.25rem;
+    }
+    /* 「Browse files」ボタン。文字だけ隠して日本語を重ねる
+       （visibility なら配色・枠線はテーマのまま保てる） */
+    [data-testid="stFileUploaderDropzone"] button {
+        visibility: hidden;
+        position: relative;
+    }
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "ファイルを選択";
+        visibility: visible;
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        white-space: nowrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.expander("📖 使い方", expanded=True):
+    st.markdown(
+        """
+        1. **書類タイプを選択** します（通帳・カード明細・電子請求書・領収書／レシート）
+        2. **ファイルをアップロード** します（PDF・PNG・JPG・XLSX。複数まとめて選択できます）
+        3. **「変換を開始」** をクリックします（読み取りに数十秒かかることがあります）
+        4. **「✏️ 仕訳の編集」** タブで内容を確認します
+           - **「要確認」にチェックが付いた行**は、勘定科目を自動で判断できなかった行です。
+             摘要を見て科目を修正し、確認できたらチェックを外してください
+           - 通帳は残高の計算が合わない行にもチェックが付きます（読み取り誤りの可能性）
+           - 修正したら **「💾 変更を保存」** をクリックします
+        5. **「🖨 出力プレビュー」** タブで件数・合計金額を確認し、
+           **「⬇️ 弥生CSVをダウンロード」** をクリックします
+           - このタブはブラウザの印刷機能（Mac: ⌘P / Windows: Ctrl+P）でそのまま印刷できます
+
+        ダウンロードしたCSVを弥生会計の「仕訳データのインポート」から取り込んでください。
+        仕訳はクライアント企業ごとに蓄積されるので、書類を数回に分けてアップロードし、
+        最後にまとめてCSVを出力することもできます。
+        """
+    )
+
 # マネーフォワード / freee は対応実装後に選択肢へ戻す（コードは温存して非表示）
 ACCOUNTING_SOFTWARE_OPTIONS = ["弥生"]  # + ["マネーフォワード", "freee"]
 
@@ -108,9 +173,10 @@ document_type = st.selectbox(
 )
 
 uploaded_files = st.file_uploader(
-    "ファイルをアップロード",
-    type=["pdf", "png", "jpg", "xlsx"],
+    "ファイルをアップロード（複数選択できます）",
+    type=["pdf", "png", "jpg", "jpeg", "xlsx"],
     accept_multiple_files=True,
+    help="PDF・PNG・JPG・XLSX に対応しています。スマートフォンで撮影した領収書の写真も使えます。",
 )
 
 if st.button("変換を開始", type="primary"):
