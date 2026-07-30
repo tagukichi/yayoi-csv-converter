@@ -81,6 +81,22 @@ def test_receipt_fallback_excludes_tendered():
     assert result.entries[0].amount == 1290
 
 
+def test_receipt_store_name_as_description():
+    """摘要にはファイル名ではなくOCRで読んだ店舗名が入る。"""
+    lines = [
+        "領収書",
+        "セブン-イレブン 江東亀戸店",
+        "2026年7月1日",
+        "合計 ¥1,290",
+    ]
+    result = parse_document(lines, "領収書", source_name="IMG_1234.jpg")
+    assert result.entries[0].description == "セブン-イレブン 江東亀戸店"
+
+    # 店名らしき行が見つからなければファイル名で代用
+    result2 = parse_document(["2026/07/01", "合計 ¥500"], "領収書", source_name="IMG_5678.jpg")
+    assert result2.entries[0].description == "IMG_5678.jpg"
+
+
 def test_unsupported_doc_type():
     result = parse_document(["何か"], "通帳")
     assert result.entries == []

@@ -48,6 +48,35 @@ _TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請�
 # レシートで合計と誤認しやすい行（預り金・釣り銭・ポイント）は金額候補から除外する
 _EXCLUDE_KEYWORDS = ("預り", "預かり", "お釣", "おつり", "釣り銭", "釣銭", "ポイント")
 
+# 店舗名の候補から除外する行（書類の種別名・宛名・連絡先など）
+_STORE_NAME_SKIP = (
+    "領収書", "領収証", "レシート", "明細", "御買上", "お買上", "請求書",
+    "invoice", "receipt", "tel", "fax", "電話", "〒", "様", "御中",
+)
+
+
+def _find_store_name(lines: list[str]) -> str | None:
+    """OCR結果の冒頭から店舗名らしき行を探す。
+
+    レシート・領収書は先頭付近に店名が印字されることが多い。日付・金額・
+    書類種別（「領収書」等）・連絡先の行を除いた最初のテキスト行を店名とみなす。
+    """
+    for line in lines[:8]:
+        text = line.strip()
+        if len(text) < 2:
+            continue
+        lowered = text.lower()
+        if any(kw in lowered for kw in _STORE_NAME_SKIP):
+            continue
+        if _find_date([text]):
+            continue
+        if _amounts_in(text):
+            continue
+        if re.fullmatch(r"[\d\s\-:/.,*¥￥円%()（）]+", text):
+            continue  # 数字・記号だけの行（電話番号・時刻など）
+        return text
+    return None
+
 
 def _to_date(m: re.Match, era: bool) -> date | None:
     try:
@@ -137,13 +166,16 @@ def parse_document(lines: list[str], document_type: str, source_name: str = "") 
     debit_account, _ = estimate_expense_account(text)
     credit_account = CREDIT_ACCOUNT_BY_DOC_TYPE[document_type]
 
+    # 摘要はOCRから拾った店舗名を優先し、取れなければファイル名で代用
+    description = _find_store_name(lines) or source_name or document_type
+
     result.entries.append(
         JournalEntry(
             date=found_date,
             debit_account=debit_account,
             credit_account=credit_account,
             amount=total,
-            description=source_name or document_type,
+            description=description,
             debit_tax=yayoi_tax(debit_account),
             credit_tax=yayoi_tax(credit_account),
             # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
@@ -200,16 +232,30 @@ def _parse_cell_amount(text: str) -> int | None:
     return value
 
 
+# セル先頭に付いた日付を剥がすためのパターン（OCRが日付と摘要を1行に結合した場合）
+_CELL_DATE_PREFIX = re.compile(r"^(\d{1,4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?\s+")
+_CELL_MD_PREFIX = re.compile(r"^(\d{1,2})[-/.月](\d{1,2})日?\s+")
+# テキスト中に埋め込まれた金額（カンマ区切り・¥・円のいずれかの目印があるもの）
+_EMBEDDED_AMOUNT = re.compile(r"[¥￥]\s*\d{1,3}(?:,\d{3})*|\d{1,3}(?:,\d{3})+円?|\d+円")
+
+
 def _split_row(
     cells: list[OcrLine],
 ) -> tuple[date | None, tuple[int, int] | None, str, list[tuple[int, float]]]:
-    """表の1行を (完全な日付, 年なしの(月,日), 摘要, [(金額, X座標), ...]) に分解する。"""
+    """表の1行を (完全な日付, 年なしの(月,日), 摘要, [(金額, X座標), ...]) に分解する。
+
+    OCRは「04/02 セブン-イレブン 1,500」のように日付・摘要・金額を1つの行
+    テキストに結合することがあるため、セル単位の判定に加えて、セル内の
+    先頭日付・埋め込み金額も抽出する。
+    """
     row_date = None
     month_day = None
     desc_parts: list[str] = []
     amounts: list[tuple[int, float]] = []
     for cell in cells:
         text = cell.text.strip()
+
+        # 1) セル全体が日付
         if row_date is None:
             d = _parse_cell_date(text)
             if d:
@@ -222,10 +268,39 @@ def _split_row(
                 if 1 <= mo <= 12 and 1 <= d <= 31:
                     month_day = (mo, d)
                     continue
+
+        # 2) セル全体が金額
         a = _parse_cell_amount(text)
         if a is not None:
             amounts.append((a, cell.x))
-        else:
+            continue
+
+        # 3) 混在セル: 先頭の日付を剥がす
+        if row_date is None and month_day is None:
+            m = _CELL_DATE_PREFIX.match(text)
+            if m:
+                d = _parse_cell_date(m.group(0).strip())
+                if d:
+                    row_date = d
+                    text = text[m.end():]
+            if row_date is None:
+                m = _CELL_MD_PREFIX.match(text)
+                if m:
+                    mo, d = int(m.group(1)), int(m.group(2))
+                    if 1 <= mo <= 12 and 1 <= d <= 31:
+                        month_day = (mo, d)
+                        text = text[m.end():]
+
+        # 3') 混在セル: 埋め込みの金額を抜き出し、残りを摘要にする
+        for am in _EMBEDDED_AMOUNT.finditer(text):
+            token = am.group(0).strip("¥￥円 ").replace(",", "")
+            if token.isdigit():
+                value = int(token)
+                if 1 <= value <= 1_000_000_000:
+                    amounts.append((value, cell.x))
+        text = _EMBEDDED_AMOUNT.sub(" ", text).strip()
+
+        if text:
             desc_parts.append(text)
     return row_date, month_day, " ".join(p for p in desc_parts if p), amounts
 
@@ -360,6 +435,13 @@ def _parse_bankbook(rows: list[list[OcrLine]], result: ParseResult) -> None:
         )
 
 
+# カード明細で取引行と誤認しやすい行（合計・請求サマリ）は仕訳にしない
+_CARD_SKIP_KEYWORDS = (
+    "合計", "小計", "ご請求", "請求金額", "請求額", "お支払", "支払金額",
+    "総額", "リボ", "繰越", "残高",
+)
+
+
 def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
     """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。"""
     resolver = _RowDateResolver(rows, result)
@@ -368,6 +450,8 @@ def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
         row_date, year_assumed = resolver.resolve(full_date, month_day)
         if row_date is None or not amounts:
             continue  # 見出し・合計行など
+        if any(kw in desc for kw in _CARD_SKIP_KEYWORDS):
+            continue  # 合計・請求サマリ行は取引ではない
         amount = amounts[-1][0]
         account, unknown = estimate_expense_account(desc)
         result.entries.append(

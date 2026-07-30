@@ -92,6 +92,39 @@ def test_card_statement():
     assert result.entries[1].needs_review is True
 
 
+def test_card_statement_merged_cells():
+    """OCRが日付・店名・金額を1つの行テキストに結合しても各行を取引にできる。"""
+    rows = [
+        _row(30, (10, "ご利用明細 2026年")),
+        _row(80, (10, "04/02 セブン-イレブン江東亀戸店 1,500")),
+        _row(110, (10, "04/15 ENEOS セルフ亀戸SS 5,800")),
+        _row(140, (10, "05/01 ご請求金額 7,300")),  # 合計行は取引にしない
+    ]
+    result = parse_table_document(rows, "カード明細")
+    assert len(result.entries) == 2
+
+    first = result.entries[0]
+    assert first.date == date(2026, 4, 2)
+    assert first.amount == 1500
+    assert "セブン-イレブン" in first.description
+    assert first.credit_account == "未払金"
+
+    second = result.entries[1]
+    assert second.date == date(2026, 4, 15)
+    assert second.amount == 5800
+    assert second.debit_account == "車輌費"  # ENEOS → 車輌費
+
+
+def test_card_statement_skips_summary_rows():
+    """日付付きの合計・請求サマリ行は仕訳にしない。"""
+    rows = [
+        _row(80, (10, "2026/04/02"), (60, "お支払金額"), (200, "45,000")),
+        _row(110, (10, "2026/04/02"), (60, "リボ残高"), (200, "120,000")),
+    ]
+    result = parse_table_document(rows, "カード明細")
+    assert result.entries == []
+
+
 def test_bankbook_month_day_dates_with_year_hint():
     """年なし日付（6-02）の通帳。見出しに年があれば補完される。"""
     rows = [

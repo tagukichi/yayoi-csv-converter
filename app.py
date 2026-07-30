@@ -183,14 +183,14 @@ else:
             use_container_width=True,
             column_config={
                 "取引日付": st.column_config.TextColumn(help="YYYY/MM/DD 形式"),
-                "金額": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                "金額": st.column_config.NumberColumn(min_value=0, step=1, format="localized"),
                 "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
                 "出典ファイル": st.column_config.TextColumn(disabled=True),
             },
             key="ledger_editor",
         )
 
-        col_save, col_clear = st.columns([1, 1])
+        col_save, col_review, col_clear = st.columns([1, 1, 1])
         with col_save:
             if st.button("💾 変更を保存"):
                 try:
@@ -199,6 +199,13 @@ else:
                     st.rerun()
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
+        with col_review:
+            if st.button("✅ 要確認を一括解除", disabled=not review_count,
+                         help="すべての行の「要確認」チェックを外して保存します"):
+                cleared = edited_df.copy()
+                cleared["要確認"] = False
+                storage.replace_entries(client, cleared)
+                st.rerun()
         with col_clear:
             confirm_clear = st.checkbox("全削除を許可", key="confirm_clear")
             if st.button("🗑 台帳を全削除", disabled=not confirm_clear):
