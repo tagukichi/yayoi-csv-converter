@@ -97,6 +97,26 @@ def test_receipt_store_name_as_description():
     assert result2.entries[0].description == "IMG_5678.jpg"
 
 
+def test_detect_document_type():
+    from parser import detect_document_type
+
+    card_lines = [
+        "楽天カード ご利用明細", "カード名義: ○○建設株式会社",
+        "カード番号: **** 1234", "お支払い月: 2026年7月",
+        "利用日", "利用店名・商品名", "支払方法", "利用金額",
+    ]
+    assert detect_document_type(card_lines) == "カード明細"
+
+    bank_lines = ["普通預金", "お預り金額", "差引残高", "繰越"]
+    assert detect_document_type(bank_lines) == "通帳"
+
+    receipt_lines = ["領収書", "お買上ありがとうございます", "お釣り"]
+    assert detect_document_type(receipt_lines) == "領収書"
+
+    # 手がかりが足りなければ None（選択された書類タイプを尊重）
+    assert detect_document_type(["こんにちは", "12345"]) is None
+
+
 def test_unsupported_doc_type():
     result = parse_document(["何か"], "通帳")
     assert result.entries == []

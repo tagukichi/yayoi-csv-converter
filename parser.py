@@ -27,6 +27,28 @@ CREDIT_ACCOUNT_BY_DOC_TYPE = {
     "電子請求書": "未払金",
 }
 
+# 書類タイプの自動判定に使うキーワード。書類タイプの選び間違い
+# （初期値の「領収書」のままカード明細をアップ等）を検出するため。
+_DOC_TYPE_SIGNALS = {
+    "カード明細": ("ご利用明細", "利用明細", "カード番号", "カード名義", "利用店名", "支払方法", "お支払い月", "利用金額", "回払い"),
+    "通帳": ("普通預金", "お預り金額", "お支払金額", "差引残高", "繰越", "通帳", "当座預金"),
+    "領収書": ("領収書", "領収証", "レシート", "お買上", "お釣り", "上様"),
+    "電子請求書": ("請求書", "御請求書", "御見積", "お振込先", "振込期日", "支払期日"),
+}
+
+
+def detect_document_type(lines: list[str]) -> str | None:
+    """OCRテキストから書類タイプを推定する。確信が持てなければ None。"""
+    text = " ".join(lines)
+    scores = {t: sum(1 for kw in kws if kw in text) for t, kws in _DOC_TYPE_SIGNALS.items()}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_type, best = ranked[0]
+    second = ranked[1][1]
+    # 2個以上のキーワードが一致し、かつ2位に明確な差があるときだけ判定する
+    if best >= 2 and best > second:
+        return best_type
+    return None
+
 # 通帳の預金口座に使う勘定科目
 BANK_ACCOUNT = "普通預金"
 # カード明細の支払いに使う勘定科目

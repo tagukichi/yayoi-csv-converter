@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import storage
 from models import JournalEntry
 from ocr import AzureOCRError, credentials_available, group_rows, run_ocr_lines
-from parser import parse_document, parse_table_document
+from parser import detect_document_type, parse_document, parse_table_document
 from yayoi_exporter import to_yayoi_csv
 
 load_dotenv()
@@ -129,16 +129,28 @@ if st.button("変換を開始", type="primary"):
                     else:
                         with st.spinner("OCR処理中..."):
                             ocr_lines = run_ocr_lines(f.getvalue())
-                        if document_type in ("通帳", "カード明細"):
+                        texts = [ln.text for ln in ocr_lines]
+
+                        # 書類タイプの選び間違い対策: OCR内容から自動判定し、
+                        # 選択と食い違っていれば判定結果の方で解析する
+                        effective_type = document_type
+                        detected = detect_document_type(texts)
+                        if detected and detected != document_type:
+                            effective_type = detected
+                            st.info(
+                                f"書類の内容から「{detected}」と判定して解析しました"
+                                f"（書類タイプの選択は「{document_type}」でした）。"
+                            )
+
+                        if effective_type in ("通帳", "カード明細"):
                             # 座標で表の行を復元してから解析する
                             rows = group_rows(ocr_lines)
-                            result = parse_table_document(rows, document_type, source_name=f.name)
+                            result = parse_table_document(rows, effective_type, source_name=f.name)
                             preview = "\n".join(
                                 " | ".join(c.text for c in row) for row in rows
                             )
                         else:
-                            texts = [ln.text for ln in ocr_lines]
-                            result = parse_document(texts, document_type, source_name=f.name)
+                            result = parse_document(texts, effective_type, source_name=f.name)
                             preview = "\n".join(texts)
                         for w in result.warnings:
                             st.warning(w)
