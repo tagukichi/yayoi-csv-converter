@@ -115,6 +115,23 @@ def test_card_statement_merged_cells():
     assert second.debit_account == "車輌費"  # ENEOS → 車輌費
 
 
+def test_card_statement_fee_column_and_noise():
+    """利用金額と手数料(0円)が並ぶ行は利用金額を採用し、摘要のノイズを除去。"""
+    rows = [
+        _row(80, (10, "2026/06/03"), (60, "ETC"), (100, "首都高速道路"),
+             (200, "本人"), (240, "1回払い"), (300, "1,320"), (360, "0")),
+        _row(110, (10, "2026/06/20"), (60, "ガスト"), (100, "多摩店"),
+             (200, "本人"), (240, "1回払い"), (300, "4,280"), (360, "0")),
+    ]
+    result = parse_table_document(rows, "カード明細")
+    assert len(result.entries) == 2
+    first = result.entries[0]
+    assert first.amount == 1320  # 手数料の0ではなく利用金額
+    assert "本人" not in first.description and "1回払い" not in first.description
+    # 「ガスト」は「ガス」(水道光熱費)に誤マッチせず交際接待費になる
+    assert result.entries[1].debit_account == "交際接待費"
+
+
 def test_card_statement_skips_summary_rows():
     """日付付きの合計・請求サマリ行は仕訳にしない。"""
     rows = [

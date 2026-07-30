@@ -441,9 +441,21 @@ _CARD_SKIP_KEYWORDS = (
     "総額", "リボ", "繰越", "残高",
 )
 
+# カード明細の摘要から取り除くノイズ（利用者・支払方法の列）
+_CARD_NOISE = re.compile(r"^(本人|家族|\d+回払い|１回払い|分割払い|リボ払い|ボーナス払い)$")
+
+
+def _clean_card_description(desc: str) -> str:
+    tokens = [t for t in desc.split() if not _CARD_NOISE.fullmatch(t)]
+    return " ".join(tokens)
+
 
 def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
-    """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。"""
+    """カード明細の明細を解析する。日付＋摘要＋利用額の行を1取引とする。
+
+    行には「利用金額」と「手数料」（1回払いなら0円）の複数の金額が並ぶことが
+    あるため、0円を除いた最大値を利用額とみなす。
+    """
     resolver = _RowDateResolver(rows, result)
     for cells in rows:
         full_date, month_day, desc, amounts = _split_row(cells)
@@ -452,7 +464,11 @@ def _parse_card(rows: list[list[OcrLine]], result: ParseResult) -> None:
             continue  # 見出し・合計行など
         if any(kw in desc for kw in _CARD_SKIP_KEYWORDS):
             continue  # 合計・請求サマリ行は取引ではない
-        amount = amounts[-1][0]
+        non_zero = [a for a, _x in amounts if a > 0]
+        if not non_zero:
+            continue  # 利用額0円の行（手数料のみ等）は取引にしない
+        amount = max(non_zero)
+        desc = _clean_card_description(desc)
         account, unknown = estimate_expense_account(desc)
         result.entries.append(
             JournalEntry(
