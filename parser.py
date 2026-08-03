@@ -62,42 +62,63 @@ _DATE_PATTERNS = [
 ]
 
 # 金額: カンマ区切り（715,000）または ¥ 付き（¥1500）を金額とみなす。
-# 桁区切りなしの裸の数字は年号・番号と区別できないため拾わない。
-_AMOUNT_PATTERN = re.compile(r"[¥￥]?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:円)?")
+# 手書き領収証では桁区切りがピリオドで書かれること（¥2.916-）があるため
+# ピリオド区切りも許容する。桁区切りなしの裸の数字は年号・番号と
+# 区別できないため拾わない。
+_AMOUNT_PATTERN = re.compile(r"[¥￥]?\s*(\d{1,3}(?:[,，.．]\d{3})+|\d+)(?:円)?")
+
+_SEPARATORS = re.compile(r"[,，.．]")
 
 _TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額", "お買上げ計", "お買い上げ計")
 
 # レシートで合計と誤認しやすい行（預り金・釣り銭・ポイント）は金額候補から除外する
 _EXCLUDE_KEYWORDS = ("預り", "預かり", "お釣", "おつり", "釣り銭", "釣銭", "ポイント")
 
-# 店舗名の候補から除外する行（書類の種別名・宛名・連絡先など）
+# 店舗名の候補から除外する行（書類の種別名・宛名・連絡先・支払欄など）
 _STORE_NAME_SKIP = (
     "領収書", "領収証", "レシート", "明細", "御買上", "お買上", "請求書",
     "invoice", "receipt", "tel", "fax", "電話", "〒", "様", "御中",
+    "登録番号", "http", "www", "印紙", "上記", "但し", "として", "支払",
+    "対象", "消費税", "軽減", "クレジット", "現金", "小切手", "手形", "入金日",
 )
+
+# 但し書き（「但 御菓子代として」）から用途を拾う
+_TADASHI_PATTERN = re.compile(r"但し?[、,]?\s*(.{2,25}?)\s*として")
+
+
+def _store_name_candidate(text: str) -> bool:
+    text = text.strip()
+    if len(text) < 2:
+        return False
+    lowered = text.lower()
+    if any(kw in lowered for kw in _STORE_NAME_SKIP):
+        return False
+    if _find_date([text]):
+        return False
+    if _amounts_in(text):
+        return False
+    if re.fullmatch(r"[\d\s\-:/.,*¥￥円%()（）]+", text):
+        return False  # 数字・記号だけの行（電話番号・時刻など）
+    return True
 
 
 def _find_store_name(lines: list[str]) -> str | None:
-    """OCR結果の冒頭から店舗名らしき行を探す。
+    """OCR結果から店舗名らしき行を探す。
 
-    レシート・領収書は先頭付近に店名が印字されることが多い。日付・金額・
-    書類種別（「領収書」等）・連絡先の行を除いた最初のテキスト行を店名とみなす。
+    レシートは先頭付近、手書きの領収証は下部の発行者欄に店名があることが
+    多いため、まず冒頭8行、見つからなければ末尾12行を逆順で探す。
     """
     for line in lines[:8]:
-        text = line.strip()
-        if len(text) < 2:
-            continue
-        lowered = text.lower()
-        if any(kw in lowered for kw in _STORE_NAME_SKIP):
-            continue
-        if _find_date([text]):
-            continue
-        if _amounts_in(text):
-            continue
-        if re.fullmatch(r"[\d\s\-:/.,*¥￥円%()（）]+", text):
-            continue  # 数字・記号だけの行（電話番号・時刻など）
-        return text
+        if _store_name_candidate(line):
+            return line.strip()
+    for line in reversed(lines[-12:]):
+        if _store_name_candidate(line):
+            return line.strip()
     return None
+
+
+# 支払手段がクレジットカードなら、貸方は現金ではなく未払金にする
+_CREDIT_PAYMENT_KEYWORDS = ("クレジット", "credit", "visa", "mastercard", "jcb", "amex")
 
 
 def _to_date(m: re.Match, era: bool) -> date | None:
@@ -125,13 +146,32 @@ def _amounts_in(line: str) -> list[int]:
     values = []
     for m in _AMOUNT_PATTERN.finditer(line):
         text = m.group(1)
-        has_marker = "," in text or "¥" in m.group(0) or "￥" in m.group(0) or "円" in m.group(0)
+        has_marker = (
+            _SEPARATORS.search(text)
+            or "¥" in m.group(0)
+            or "￥" in m.group(0)
+            or "円" in m.group(0)
+        )
         if not has_marker:
             continue  # 裸の数字（年号・電話番号の断片など）は金額とみなさない
-        value = int(text.replace(",", ""))
+        value = int(_SEPARATORS.sub("", text))
         if 1 <= value <= 100_000_000:
             values.append(value)
     return values
+
+
+def _rate_target_amount(lines: list[str], rate: str) -> int | None:
+    """「8%対象 ¥1,410」「10%対象￥0-」のような税率別内訳の金額を探す。"""
+    pat = re.compile(rf"{rate}\s*[%％]")
+    for i, line in enumerate(lines):
+        if pat.search(line) and "対象" in line:
+            for near in lines[i : i + 2]:
+                m = re.search(r"[¥￥]\s*([\d,，.．]+)|(\d{1,3}(?:[,，.．]\d{3})+)", near)
+                if m:
+                    token = _SEPARATORS.sub("", (m.group(1) or m.group(2))).strip()
+                    if token.isdigit():
+                        return int(token)
+    return None
 
 
 def _find_total(lines: list[str]) -> int | None:
@@ -193,8 +233,39 @@ def parse_document(
     debit_account, _ = estimate_expense_account(text, custom_expense_rules)
     credit_account = CREDIT_ACCOUNT_BY_DOC_TYPE[document_type]
 
-    # 摘要はOCRから拾った店舗名を優先し、取れなければファイル名で代用
+    # 支払手段がクレジットカードなら、貸方を現金ではなく未払金にする
+    if credit_account == "現金" and any(
+        kw in text.lower() for kw in _CREDIT_PAYMENT_KEYWORDS
+    ):
+        credit_account = "未払金"
+
+    # 摘要はOCRから拾った店舗名を優先し、取れなければファイル名で代用。
+    # 但し書き（「御菓子代として」等）が読めれば添える
     description = _find_store_name(lines) or source_name or document_type
+    tadashi = _TADASHI_PATTERN.search(text)
+    if tadashi:
+        description = f"{description} {tadashi.group(1)}"
+
+    # 軽減税率8%の判定。全額が8%対象なら税区分を軽減8%にし、
+    # 10%との混在は仕訳の分け方が会計事務所の確認待ちのため要確認に留める
+    debit_tax = yayoi_tax(debit_account)
+    note = "暫定解析（合計金額ベース）"
+    reduced_hint = ("軽減" in text) or re.search(r"8\s*[%％]\s*(?:軽減)?対象", text)
+    if reduced_hint and debit_tax == "課対仕入込10%":
+        amount8 = _rate_target_amount(lines, "8")
+        amount10 = _rate_target_amount(lines, "10")
+        if amount8 == total or amount10 == 0:
+            debit_tax = "課対仕入込軽減8%"
+        elif amount8 and amount10 and amount8 + amount10 == total:
+            note = f"軽減8%（{amount8:,}円）と10%（{amount10:,}円）の混在"
+            result.warnings.append(
+                f"軽減税率8%（{amount8:,}円）と10%（{amount10:,}円）が混在しています。"
+                "仕訳の分け方が確定するまで1行のまま要確認にしています。"
+            )
+        else:
+            result.warnings.append(
+                "軽減税率の記載がありますが内訳を特定できませんでした。税区分を確認してください。"
+            )
 
     result.entries.append(
         JournalEntry(
@@ -203,11 +274,11 @@ def parse_document(
             credit_account=credit_account,
             amount=total,
             description=description,
-            debit_tax=yayoi_tax(debit_account),
+            debit_tax=debit_tax,
             credit_tax=yayoi_tax(credit_account),
             # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
             needs_review=True,
-            note="暫定解析（合計金額ベース）",
+            note=note,
         )
     )
     return result
@@ -217,6 +288,8 @@ def parse_document(
 
 # 通帳の日付セル: 08-04-01（和暦の令和8年）/ 2026-04-01 / 8.4.1 など
 _CELL_DATE_PATTERN = re.compile(r"^(\d{1,4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$")
+# 通帳の行番号が日付にくっついたセル: 1008.04.24 = 行番号10 + 08.04.24
+_CELL_ROWNUM_DATE_PATTERN = re.compile(r"^(\d{1,2})\s*(\d{2})[-/.](\d{1,2})[-/.](\d{1,2})日?$")
 # 年なしの日付セル: 6-02 / 6/2 / 6月2日 など（年は文書内の別の記載や前後の行から補う）
 _CELL_MONTH_DAY_PATTERN = re.compile(r"^(\d{1,2})[-/.月](\d{1,2})日?$")
 # 表以外の場所（見出し等）から年を拾うためのパターン
@@ -226,24 +299,43 @@ _YEAR_HINT_PATTERNS = [
 ]
 
 
-def _parse_cell_date(text: str) -> date | None:
-    """表のセル1つを日付として解釈する。
+def _era_or_western(y: int, mo: int, d: int) -> date | None:
+    """年の解釈（18以下=令和、99以下=西暦下2桁）と妥当性チェック付きで日付を作る。
 
-    通帳の日付は「08-04-01」のように和暦（元号なし）で印字されることが
-    多い。年が18以下なら令和の年（+2018）、19〜99なら西暦下2桁とみなす。
+    通帳の行番号が日付にくっつくと「1008.04.24」（行番号10＋令和8年）の
+    ような値になるため、解釈後の年が現実的な範囲（1990〜2100年）に
+    収まらないものは日付として採用しない。
     """
-    m = _CELL_DATE_PATTERN.match(text.strip())
-    if not m:
-        return None
-    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
     if y <= 18:  # 令和（R18=2036年まで対応）
         y += 2018
     elif y <= 99:  # 西暦下2桁
         y += 2000 if y < 80 else 1900
+    if not (1990 <= y <= 2100):
+        return None
     try:
         return date(y, mo, d)
     except ValueError:
         return None
+
+
+def _parse_cell_date(text: str) -> date | None:
+    """表のセル1つを日付として解釈する。
+
+    通帳の日付は「08-04-01」のように和暦（元号なし）で印字されることが
+    多い。また左端の行番号がくっついた「1008.04.24」（行番号10＋08.04.24）
+    にも対応する。
+    """
+    text = text.strip()
+    m = _CELL_DATE_PATTERN.match(text)
+    if m:
+        found = _era_or_western(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if found:
+            return found
+    # 行番号付き: 1〜2桁の行番号 + 2桁年の日付
+    m = _CELL_ROWNUM_DATE_PATTERN.match(text)
+    if m:
+        return _era_or_western(int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    return None
 
 
 def _parse_cell_amount(text: str) -> int | None:
@@ -261,6 +353,8 @@ def _parse_cell_amount(text: str) -> int | None:
 
 # セル先頭に付いた日付を剥がすためのパターン（OCRが日付と摘要を1行に結合した場合）
 _CELL_DATE_PREFIX = re.compile(r"^(\d{1,4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?\s+")
+# 行番号付きの先頭日付: 「15 08.04.30 保険 …」（行番号15 + 令和8年4月30日）
+_CELL_ROWNUM_DATE_PREFIX = re.compile(r"^(\d{1,2})?\s*(\d{2})[-/.](\d{1,2})[-/.](\d{1,2})日?\s+")
 _CELL_MD_PREFIX = re.compile(r"^(\d{1,2})[-/.月](\d{1,2})日?\s+")
 # テキスト中に埋め込まれた金額（カンマ区切り・¥・円のいずれかの目印があるもの）
 _EMBEDDED_AMOUNT = re.compile(r"[¥￥]\s*\d{1,3}(?:,\d{3})*|\d{1,3}(?:,\d{3})+円?|\d+円")
@@ -310,6 +404,14 @@ def _split_row(
                 if d:
                     row_date = d
                     text = text[m.end():]
+            if row_date is None:
+                # 行番号付き（「15 08.04.30 保険 …」）の先頭日付
+                m = _CELL_ROWNUM_DATE_PREFIX.match(text)
+                if m:
+                    d = _era_or_western(int(m.group(2)), int(m.group(3)), int(m.group(4)))
+                    if d:
+                        row_date = d
+                        text = text[m.end():]
             if row_date is None:
                 m = _CELL_MD_PREFIX.match(text)
                 if m:

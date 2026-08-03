@@ -154,6 +154,113 @@ def test_custom_rules_priority():
     assert (account, review) == ("売上高", False)
 
 
+def test_receipt_reduced_tax_full():
+    """全額が軽減8%対象のレシート（木村ピーナッツの実物を再現）。"""
+    lines = [
+        "[領収書]", "有限会社木村ピーナッツ", "千葉県館山市下真倉236-3",
+        "TEL:0470-22-3488", "登録番号:T2040002099323",
+        "2026/05/05 16:30:22", "レジ:0001 担当:0001",
+        "*ピーナッツソフト[コーン]", "¥470 3点 ¥1,410",
+        "小計 3点 ¥1,410", "合計 ¥1,410",
+        "(内消費税等 ¥104)", "(8%軽減対象 ¥1,410)",
+        "現金 ¥2,000", "お預り ¥2,000", "お釣り ¥590",
+        "*印は軽減税率(8%)適用商品",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 1410
+    assert e.debit_tax == "課対仕入込軽減8%"  # 全額軽減
+    assert e.credit_account == "現金"  # クレジット表記なし
+    assert e.description == "有限会社木村ピーナッツ"
+    assert e.date == date(2026, 5, 5)
+
+
+def test_receipt_handwritten_credit_and_bottom_store():
+    """手書き領収証（緑壽庵清水の実物を再現）: ピリオド区切り金額・
+    クレジット払い・下部の発行者名・但し書き。"""
+    lines = [
+        "領収証", "上", "様", "¥2.916-", "但 御菓子代として", "クレジット",
+        "入金日 2026年5月5日 上記の金額正に領収いたしました",
+        "8%対象 ¥2.916-", "内訳 10%対象 ¥0-", "内消費税 ¥216-",
+        "現金", "小切手", "手形", "銀座", "株式会社 緑壽庵清水",
+        "〒104-0061 東京都中央区銀座6丁目2番地1号",
+        "TEL (03)5537-9111 FAX (03)5537-9112",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 2916  # 「¥2.916-」を桁区切りとして解釈
+    assert e.credit_account == "未払金"  # クレジット払い
+    assert e.debit_tax == "課対仕入込軽減8%"  # 10%対象が0円 → 全額軽減
+    assert "緑壽庵清水" in e.description
+    assert "御菓子代" in e.description  # 但し書き
+
+
+def test_receipt_mixed_tax_flagged():
+    """8%と10%が混在する領収証は1行のまま要確認＋警告。"""
+    lines = [
+        "領収証", "上 様", "6,885-", "但 御菓子代として", "クレジット",
+        "入金日 2026年5月6日",
+        "8%対象 ¥5,940-", "内訳 10%対象 ¥945-",
+        "内消費税 ¥440-", "内消費税 ¥85-",
+        "株式会社 緑壽庵清水",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 6885
+    assert e.debit_tax == "課対仕入込10%"  # 分割方針が確定するまで既定のまま
+    assert e.needs_review is True
+    assert any("混在" in w for w in result.warnings)
+    assert "混在" in e.note
+
+
+def test_image_compression():
+    import io as _io
+
+    import numpy as np
+    from PIL import Image
+
+    from ocr import compress_image_if_needed
+
+    # 圧縮が効きにくいノイズ画像で 3.5MB 超のJPEGを作る
+    noise = np.random.randint(0, 255, (3500, 2600, 3), dtype=np.uint8)
+    buf = _io.BytesIO()
+    Image.fromarray(noise).save(buf, "JPEG", quality=95)
+    big = buf.getvalue()
+    assert len(big) > int(3.5 * 1024 * 1024)
+
+    out, note = compress_image_if_needed(big, "photo.jpg")
+    assert len(out) <= int(3.5 * 1024 * 1024)
+    assert note is not None
+    # 上限内の画像・PDFはそのまま
+    small, note2 = compress_image_if_needed(b"x" * 1000, "small.jpg")
+    assert small == b"x" * 1000 and note2 is None
+    pdf, note3 = compress_image_if_needed(big, "doc.pdf")
+    assert pdf == big and note3 is None
+
+
+def test_multi_receipt_clustering():
+    from ocr import OcrLine, split_text_clusters
+
+    def L(text, y, x=10.0):
+        return OcrLine(text=text, x=x, y=y, height=10.0, page=1, width=200.0)
+
+    receipt_a = [
+        L("領収書", 0), L("A商店", 20), L("2026/05/01", 40), L("合計 ¥1,000", 60),
+    ]
+    receipt_b = [
+        L("領収書", 400), L("B食堂", 420), L("2026/05/02", 440), L("合計 ¥2,000", 460),
+    ]
+    clusters = split_text_clusters(receipt_a + receipt_b)
+    assert len(clusters) == 2
+    r1 = parse_document([ln.text for ln in clusters[0]], "領収書")
+    r2 = parse_document([ln.text for ln in clusters[1]], "領収書")
+    assert r1.entries[0].amount == 1000
+    assert r2.entries[0].amount == 2000
+
+    # 1枚のレシートだけなら分割されない
+    assert len(split_text_clusters(receipt_a)) == 1
+
+
 def test_detect_document_type():
     from parser import detect_document_type
 

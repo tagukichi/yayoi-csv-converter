@@ -76,6 +76,42 @@ def test_bankbook_balance_mismatch_flagged():
     assert any("残高" in w for w in result.warnings)
 
 
+def test_bankbook_with_row_numbers():
+    """左端の行番号が日付にくっつく通帳（実物のフィードバックを再現）。
+
+    「108.03.25」= 行番号1 + 令和8年3月25日。従来はこれが西暦1008年等に
+    誤解釈され、行の欠落や日付異常（1008/04/24）が起きていた。
+    """
+    rows = [
+        _row(50, (5, "年月日"), (60, "摘要"), (150, "お支払金額"), (220, "お預り金額"), (300, "差引残高")),
+        _row(80, (5, "108.03.25"), (60, "繰越"), (300, "¥560,856")),
+        _row(110, (5, "208.03.26"), (60, "保険"), (150, "17,090"), (220, "トウキヨウカイシ ヨウニ"), (300, "¥543,766")),
+        # 入金: 543,766 + 300,000 = 843,766
+        _row(140, (5, "708.04.24"), (60, "振込 サカイ リヨウ"), (220, "300,000"), (300, "¥843,766")),
+        # 行番号・日付・摘要が1セルに結合したケース: 843,766 - 29,565 = 814,201
+        _row(170, (5, "15 08.04.30 保険 シヤカイホケンリヨウ"), (150, "29,565"), (300, "¥814,201")),
+    ]
+    result = parse_table_document(rows, "通帳")
+    assert len(result.entries) == 3
+
+    first = result.entries[0]
+    assert first.date == date(2026, 3, 26)  # 行番号2を除いた 08.03.26
+    assert first.debit_account == "保険料"
+    assert first.amount == 17090
+    assert first.needs_review is False  # 残高チェック成立
+
+    deposit = result.entries[1]
+    assert deposit.date == date(2026, 4, 24)
+    assert deposit.debit_account == "普通預金"
+    assert deposit.amount == 300000
+
+    merged = result.entries[2]
+    assert merged.date == date(2026, 4, 30)  # 結合セルから日付を抽出
+    assert merged.debit_account == "保険料"
+    assert merged.amount == 29565
+    assert merged.needs_review is False
+
+
 def test_card_statement():
     rows = [
         _row(50, (10, "利用日"), (60, "利用店名"), (200, "利用金額")),

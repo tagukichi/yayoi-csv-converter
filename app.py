@@ -6,9 +6,17 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import storage
-from models import JournalEntry
-from ocr import AzureOCRError, credentials_available, group_rows, run_ocr_lines
 from accounts import yayoi_tax
+from models import JournalEntry, ParseResult
+from ocr import (
+    AzureOCRError,
+    compress_image_if_needed,
+    credentials_available,
+    group_rows,
+    is_image_filename,
+    run_ocr_lines,
+    split_text_clusters,
+)
 from parser import detect_document_type, parse_document, parse_table_document
 from yayoi_exporter import to_yayoi_csv
 
@@ -218,8 +226,14 @@ if st.button("変換を開始", type="primary"):
                         st.dataframe(df)
                         st.caption("xlsx の自動解析は未対応です（プレビューのみ）。")
                     else:
+                        # スマホ写真などの大きな画像はOCRの上限(4MB)内に自動圧縮
+                        file_bytes, compress_note = compress_image_if_needed(
+                            f.getvalue(), f.name
+                        )
+                        if compress_note:
+                            st.caption(f"🗜 {compress_note}")
                         with st.spinner("OCR処理中..."):
-                            ocr_lines = run_ocr_lines(f.getvalue())
+                            ocr_lines = run_ocr_lines(file_bytes)
                         texts = [ln.text for ln in ocr_lines]
 
                         # 書類タイプの選び間違い対策: OCR内容から自動判定し、
@@ -245,11 +259,40 @@ if st.button("変換を開始", type="primary"):
                                 " | ".join(c.text for c in row) for row in rows
                             )
                         else:
-                            result = parse_document(
-                                texts, effective_type, source_name=f.name,
-                                custom_expense_rules=learned_expense,
+                            # 写真の領収書は、1枚に複数写っている場合に備えて
+                            # 座標のかたまりごとに分割してそれぞれ解析する
+                            clusters = (
+                                split_text_clusters(ocr_lines)
+                                if effective_type == "領収書" and is_image_filename(f.name)
+                                else [ocr_lines]
                             )
-                            preview = "\n".join(texts)
+                            if len(clusters) > 1:
+                                st.info(
+                                    f"1枚の画像から {len(clusters)} 件のレシートを検出し、"
+                                    "それぞれ解析しました（分割結果はすべて要確認です）。"
+                                )
+                                result = ParseResult()
+                                for cluster in clusters:
+                                    partial = parse_document(
+                                        [ln.text for ln in cluster],
+                                        effective_type,
+                                        source_name=f.name,
+                                        custom_expense_rules=learned_expense,
+                                    )
+                                    for e in partial.entries:
+                                        e.needs_review = True
+                                    result.entries.extend(partial.entries)
+                                    result.warnings.extend(partial.warnings)
+                                preview = "\n\n――― レシート区切り ―――\n\n".join(
+                                    "\n".join(ln.text for ln in cluster)
+                                    for cluster in clusters
+                                )
+                            else:
+                                result = parse_document(
+                                    texts, effective_type, source_name=f.name,
+                                    custom_expense_rules=learned_expense,
+                                )
+                                preview = "\n".join(texts)
                         for w in result.warnings:
                             st.warning(w)
                         added = storage.add_entries(client, result.entries, source_file=f.name)

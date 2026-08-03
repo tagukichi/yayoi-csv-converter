@@ -2,11 +2,13 @@
 
 run_ocr() はテキスト行のみ、run_ocr_lines() は座標付きの行を返す。
 通帳・カード明細のような表形式の書類は、座標を使って行・列を復元する
-（group_rows() 参照）。
+（group_rows() 参照）。1枚の写真に複数のレシートが写っている場合は
+split_text_clusters() で空間的なかたまりに分割できる。
 """
 
 from __future__ import annotations
 
+import io
 import os
 import time
 from dataclasses import dataclass
@@ -18,6 +20,57 @@ OCR_API_VERSION = "v3.2"
 # 無料プラン(F0)は 4MB まで・先頭2ページのみ処理される
 MAX_FILE_SIZE_MB = 50
 
+# Azure F0 の画像上限は 4MB。余裕を見て 3.5MB を目標に圧縮する
+_MAX_IMAGE_BYTES = int(3.5 * 1024 * 1024)
+
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def is_image_filename(filename: str) -> bool:
+    return filename.lower().endswith(_IMAGE_EXTENSIONS)
+
+
+def compress_image_if_needed(file_bytes: bytes, filename: str) -> tuple[bytes, str | None]:
+    """スマホ写真などの大きな画像をOCRの上限内に自動圧縮する。
+
+    Azure 無料プラン(F0)の画像上限は4MB。スマホ写真は普通に超えるため、
+    上限超過時は EXIF の回転を反映したうえで縮小・JPEG再圧縮する。
+    戻り値: (送信するバイト列, ユーザー向けメッセージ or None)。
+    画像以外や上限内のファイルはそのまま返す。
+    """
+    if not is_image_filename(filename) or len(file_bytes) <= _MAX_IMAGE_BYTES:
+        return file_bytes, None
+
+    from PIL import Image, ImageOps
+
+    original_mb = len(file_bytes) / (1024 * 1024)
+    img = Image.open(io.BytesIO(file_bytes))
+    img = ImageOps.exif_transpose(img)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    max_side = 2600
+    result = file_bytes
+    while max_side >= 1200:
+        w, h = img.size
+        scale = min(1.0, max_side / max(w, h))
+        work = (
+            img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            if scale < 1.0
+            else img
+        )
+        for quality in (85, 75, 65):
+            buf = io.BytesIO()
+            work.save(buf, "JPEG", quality=quality, optimize=True)
+            result = buf.getvalue()
+            if len(result) <= _MAX_IMAGE_BYTES:
+                return result, (
+                    f"画像が大きいため自動圧縮しました"
+                    f"（{original_mb:.1f}MB → {len(result) / (1024 * 1024):.1f}MB）。"
+                )
+        max_side = int(max_side * 0.8)
+    return result, "画像を自動圧縮しました（画質を落として送信します）。"
+
 
 class AzureOCRError(Exception):
     """OCR処理で発生したエラー。"""
@@ -27,8 +80,9 @@ class AzureOCRError(Exception):
 class OcrLine:
     """OCRで読み取った1行（座標付き）。
 
-    x, y は行の左上付近の座標、height は行の高さ。単位は PDF なら inch、
-    画像なら pixel（同一ファイル内で一貫しているため相対比較にのみ使う）。
+    x, y は行の左上付近の座標、height は行の高さ、width は行の幅。
+    単位は PDF なら inch、画像なら pixel（同一ファイル内で一貫している
+    ため相対比較にのみ使う）。
     """
 
     text: str
@@ -36,6 +90,7 @@ class OcrLine:
     y: float
     height: float
     page: int
+    width: float = 0.0
 
 
 def get_credentials() -> tuple[str, str]:
@@ -73,6 +128,12 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
         timeout=30,
     )
     if res.status_code != 202:
+        if "InvalidImageSize" in res.text or "too large" in res.text:
+            raise AzureOCRError(
+                "ファイルがOCRの上限（無料プランは4MB）を超えています。"
+                "画像は自動圧縮されますが、PDFの場合はページを分割するか、"
+                "Azureの有料プラン(S1)への切り替えをご検討ください。"
+            )
         raise AzureOCRError(f"OCRリクエストに失敗しました: HTTP {res.status_code} {res.text}")
 
     operation_url = res.headers["Operation-Location"]
@@ -120,6 +181,7 @@ def run_ocr_lines(
                     y=(min(ys) + max(ys)) / 2,
                     height=max(ys) - min(ys),
                     page=page_no,
+                    width=max(xs) - min(xs),
                 )
             )
     return lines
@@ -159,3 +221,77 @@ def group_rows(lines: list[OcrLine]) -> list[list[OcrLine]]:
         if current:
             rows.append(sorted(current, key=lambda c: c.x))
     return rows
+
+
+def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
+    """1枚の画像内で空間的に離れたテキストのかたまりに分割する。
+
+    複数のレシートを1枚の写真に収めた場合に、レシートごとのグループへ
+    分ける用途。行同士が縦横とも近ければ同じグループとみなす
+    （Union-Find による連結成分）。数行しかない小さなグループは
+    誤分割とみなして最寄りのグループに併合する。
+    """
+    if len(lines) < 2:
+        return [lines] if lines else []
+
+    heights = sorted(ln.height for ln in lines)
+    mh = heights[len(heights) // 2] or 1.0
+
+    def width_of(ln: OcrLine) -> float:
+        return ln.width if ln.width > 0 else len(ln.text) * mh * 0.6
+
+    parent = list(range(len(lines)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        parent[find(i)] = find(j)
+
+    for i in range(len(lines)):
+        for j in range(i + 1, len(lines)):
+            a, b = lines[i], lines[j]
+            if a.page != b.page:
+                continue
+            dy = abs(a.y - b.y)
+            ax2, bx2 = a.x + width_of(a), b.x + width_of(b)
+            dx = max(0.0, max(a.x, b.x) - min(ax2, bx2))
+            if dy < 3.0 * mh and dx < 3.0 * mh:
+                union(i, j)
+
+    groups: dict[int, list[OcrLine]] = {}
+    for i, ln in enumerate(lines):
+        groups.setdefault(find(i), []).append(ln)
+    clusters = list(groups.values())
+
+    # 小さすぎるグループ（3行未満）は誤分割の可能性が高いので最寄りに併合
+    def centroid(cluster: list[OcrLine]) -> tuple[float, float]:
+        return (
+            sum(l.x for l in cluster) / len(cluster),
+            sum(l.y for l in cluster) / len(cluster),
+        )
+
+    merged = True
+    while merged and len(clusters) > 1:
+        merged = False
+        for small in clusters:
+            if len(small) >= 3:
+                continue
+            sx, sy = centroid(small)
+            others = [c for c in clusters if c is not small]
+            nearest = min(
+                others,
+                key=lambda c: (centroid(c)[0] - sx) ** 2 + (centroid(c)[1] - sy) ** 2,
+            )
+            nearest.extend(small)
+            clusters.remove(small)
+            merged = True
+            break
+
+    clusters.sort(key=lambda c: (min(l.page for l in c), min(l.y for l in c), min(l.x for l in c)))
+    for c in clusters:
+        c.sort(key=lambda l: (l.page, l.y, l.x))
+    return clusters
