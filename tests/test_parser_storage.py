@@ -195,8 +195,8 @@ def test_receipt_handwritten_credit_and_bottom_store():
     assert "御菓子代" in e.description  # 但し書き
 
 
-def test_receipt_mixed_tax_flagged():
-    """8%と10%が混在する領収証は1行のまま要確認＋警告。"""
+def test_receipt_mixed_tax_split():
+    """8%と10%が混在する領収証は2行に分割する（会計事務所の指示）。"""
     lines = [
         "領収証", "上 様", "6,885-", "但 御菓子代として", "クレジット",
         "入金日 2026年5月6日",
@@ -205,12 +205,19 @@ def test_receipt_mixed_tax_flagged():
         "株式会社 緑壽庵清水",
     ]
     result = parse_document(lines, "領収書")
-    e = result.entries[0]
-    assert e.amount == 6885
-    assert e.debit_tax == "課対仕入込10%"  # 分割方針が確定するまで既定のまま
-    assert e.needs_review is True
-    assert any("混在" in w for w in result.warnings)
-    assert "混在" in e.note
+    assert len(result.entries) == 2
+
+    reduced, standard = result.entries
+    assert reduced.amount == 5940
+    assert reduced.debit_tax == "課対仕入込軽減8%"
+    assert "軽減8%分" in reduced.description
+    assert standard.amount == 945
+    assert standard.debit_tax == "課対仕入込10%"
+    assert "10%分" in standard.description
+    # 合計は元の領収証と一致し、どちらもクレジット払い→未払金
+    assert reduced.amount + standard.amount == 6885
+    assert reduced.credit_account == standard.credit_account == "未払金"
+    assert any("分割" in w for w in result.warnings)
 
 
 def test_image_compression():

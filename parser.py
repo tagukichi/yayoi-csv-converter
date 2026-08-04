@@ -246,41 +246,53 @@ def parse_document(
     if tadashi:
         description = f"{description} {tadashi.group(1)}"
 
-    # 軽減税率8%の判定。全額が8%対象なら税区分を軽減8%にし、
-    # 10%との混在は仕訳の分け方が会計事務所の確認待ちのため要確認に留める
+    # 軽減税率8%の判定。全額が8%対象なら税区分を軽減8%に、
+    # 10%との混在は会計事務所の指示により8%分と10%分の2行に分割する
     debit_tax = yayoi_tax(debit_account)
+    credit_tax = yayoi_tax(credit_account)
     note = "暫定解析（合計金額ベース）"
     reduced_hint = ("軽減" in text) or re.search(r"8\s*[%％]\s*(?:軽減)?対象", text)
+
+    def _entry(amount: int, tax: str, desc: str, entry_note: str) -> JournalEntry:
+        # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
+        return JournalEntry(
+            date=found_date,
+            debit_account=debit_account,
+            credit_account=credit_account,
+            amount=amount,
+            description=desc,
+            debit_tax=tax,
+            credit_tax=credit_tax,
+            needs_review=True,
+            note=entry_note,
+        )
+
     if reduced_hint and debit_tax == "課対仕入込10%":
         amount8 = _rate_target_amount(lines, "8")
         amount10 = _rate_target_amount(lines, "10")
         if amount8 == total or amount10 == 0:
-            debit_tax = "課対仕入込軽減8%"
-        elif amount8 and amount10 and amount8 + amount10 == total:
-            note = f"軽減8%（{amount8:,}円）と10%（{amount10:,}円）の混在"
-            result.warnings.append(
-                f"軽減税率8%（{amount8:,}円）と10%（{amount10:,}円）が混在しています。"
-                "仕訳の分け方が確定するまで1行のまま要確認にしています。"
+            result.entries.append(
+                _entry(total, "課対仕入込軽減8%", description, note)
             )
-        else:
-            result.warnings.append(
-                "軽減税率の記載がありますが内訳を特定できませんでした。税区分を確認してください。"
+            return result
+        if amount8 and amount10 and amount8 + amount10 == total:
+            # 8%分と10%分を別仕訳に分割（会計事務所の指示）
+            result.entries.append(
+                _entry(amount8, "課対仕入込軽減8%", f"{description}（軽減8%分）", "混在レシートの分割")
             )
-
-    result.entries.append(
-        JournalEntry(
-            date=found_date,
-            debit_account=debit_account,
-            credit_account=credit_account,
-            amount=total,
-            description=description,
-            debit_tax=debit_tax,
-            credit_tax=yayoi_tax(credit_account),
-            # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
-            needs_review=True,
-            note=note,
+            result.entries.append(
+                _entry(amount10, "課対仕入込10%", f"{description}（10%分）", "混在レシートの分割")
+            )
+            result.warnings.append(
+                f"軽減税率の混在を検出し、8%分（{amount8:,}円）と10%分（{amount10:,}円）の"
+                "2行に分割しました。"
+            )
+            return result
+        result.warnings.append(
+            "軽減税率の記載がありますが内訳を特定できませんでした。税区分を確認してください。"
         )
-    )
+
+    result.entries.append(_entry(total, debit_tax, description, note))
     return result
 
 
