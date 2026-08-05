@@ -303,6 +303,41 @@ def test_image_compression():
     assert pdf == big and note3 is None
 
 
+def test_receipt_clusters_dedup_split_receipt():
+    """1枚のレシートが2つに割れて同額の仕訳が重複するのを防ぐ。
+
+    実機では、えびす自動車のタクシー領収書が「売上票」と「領収書」の
+    2つのかたまりに割れ、3,200円が二重に計上されて5件になっていた。
+    また端の断片（金額なし）が余分なかたまりになる。
+    """
+    from doc_parser import parse_receipt_clusters
+
+    clusters = [
+        ["領収書", "エコロパーク 恵比寿第1", "2026/06/08 17:49", "合計 1,600円"],
+        ["領収書", "日本パーキング株式会社", "2026年06月24日", "請求金額 3,960円"],
+        # 同じタクシー領収書の売上票側（日付あり）
+        ["交通系 ICカード売上票", "えびす自動車(株)", "御利用 日.2026/06/20", "合計金額 ¥3200円"],
+        # 同じ領収書の控え側（日付は '26年06月20日 表記）
+        ["収", "えびす自動車株式会社", "日付 ’26年06月20日", "¥3200円"],
+        ["東海旅客鉄道株式会社", "2026年 6月13日", "但し、乗車券類(クレジット扱い)として", "¥12. 050円"],
+        # 金額のない断片（分割の副産物）
+        ["駅-No 51301160", "領収書-No", "窓口-No", "763", "65"],
+    ]
+    result = parse_receipt_clusters(clusters, source_name="receipts.jpg")
+
+    amounts = sorted(e.amount for e in result.entries)
+    assert amounts == [1600, 3200, 3960, 12050], amounts
+    assert all(e.needs_review for e in result.entries)
+    # 重複をまとめた旨は利用者に伝える
+    assert any("同じ金額" in w and "3,200円" in w for w in result.warnings)
+    # 金額のない断片についての警告は出さない
+    assert not any("金額を検出できません" in w for w in result.warnings)
+
+    # '26年06月20日 表記も日付として読める（重複解消時に残る側の日付）
+    taxi = next(e for e in result.entries if e.amount == 3200)
+    assert taxi.date == date(2026, 6, 20)
+
+
 def test_multi_receipt_clustering_rotated():
     """横向きに撮影されたレシート（テキストが90度回転）でも分割できる。
 

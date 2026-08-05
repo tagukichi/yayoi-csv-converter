@@ -21,6 +21,7 @@ from doc_parser import (
     detect_document_type,
     parse_document,
     parse_payroll,
+    parse_receipt_clusters,
     parse_table_document,
 )
 from yayoi_exporter import to_yayoi_csv
@@ -264,22 +265,15 @@ if st.button("変換を開始", type="primary"):
                                 )
 
                         if receipt_clusters is not None:
-                            st.info(
-                                f"1枚の画像から {len(receipt_clusters)} 件のレシートを検出し、"
-                                "それぞれ解析しました（分割結果はすべて要確認です）。"
+                            result = parse_receipt_clusters(
+                                [[ln.text for ln in cluster] for cluster in receipt_clusters],
+                                source_name=f.name,
+                                custom_expense_rules=learned_expense,
                             )
-                            result = ParseResult()
-                            for cluster in receipt_clusters:
-                                partial = parse_document(
-                                    [ln.text for ln in cluster],
-                                    "領収書",
-                                    source_name=f.name,
-                                    custom_expense_rules=learned_expense,
-                                )
-                                for e in partial.entries:
-                                    e.needs_review = True
-                                result.entries.extend(partial.entries)
-                                result.warnings.extend(partial.warnings)
+                            st.info(
+                                f"1枚の画像から {len(result.entries)} 件のレシートを検出し、"
+                                "それぞれ解析しました（結果はすべて要確認です）。"
+                            )
                             preview = "\n\n――― レシート区切り ―――\n\n".join(
                                 "\n".join(ln.text for ln in cluster)
                                 for cluster in receipt_clusters

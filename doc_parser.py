@@ -68,11 +68,15 @@ BANK_ACCOUNT = "普通預金"
 # カード明細の支払いに使う勘定科目
 CARD_CREDIT_ACCOUNT = "未払金"
 
-# 対応する日付表記: 2026年4月1日 / 2026/04/01 / 2026-4-1 / 令和8年4月1日 / R8.4.1
+# 対応する日付表記と年の解釈:
+#   西暦4桁 2026年4月1日 / 2026/04/01 / 2026-4-1
+#   令和    令和8年4月1日 / R8.4.1
+#   西暦2桁 '26年06月20日（タクシー領収書などで使われる。頭の記号が目印）
 _DATE_PATTERNS = [
-    re.compile(r"(20\d{2})\s*[年/.\-]\s*(\d{1,2})\s*[月/.\-]\s*(\d{1,2})日?"),
-    re.compile(r"令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"),
-    re.compile(r"[RＲ](\d{1,2})[.．](\d{1,2})[.．](\d{1,2})"),
+    (re.compile(r"(20\d{2})\s*[年/.\-]\s*(\d{1,2})\s*[月/.\-]\s*(\d{1,2})日?"), "western"),
+    (re.compile(r"令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"), "reiwa"),
+    (re.compile(r"[RＲ](\d{1,2})[.．](\d{1,2})[.．](\d{1,2})"), "reiwa"),
+    (re.compile(r"['’‘´`](\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"), "yy"),
 ]
 
 # 金額: カンマ区切り（715,000）または ¥ 付き（¥1500）を金額とみなす。
@@ -145,11 +149,13 @@ def _find_store_name(lines: list[str]) -> str | None:
 _CREDIT_PAYMENT_KEYWORDS = ("クレジット", "credit", "visa", "mastercard", "jcb", "amex")
 
 
-def _to_date(m: re.Match, era: bool) -> date | None:
+def _to_date(m: re.Match, mode: str) -> date | None:
     try:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if era:
+        if mode == "reiwa":
             y += 2018  # 令和元年 = 2019
+        elif mode == "yy":
+            y += 2000
         return date(y, mo, d)
     except ValueError:
         return None
@@ -157,10 +163,10 @@ def _to_date(m: re.Match, era: bool) -> date | None:
 
 def _find_date(lines: list[str]) -> date | None:
     for line in lines:
-        for i, pat in enumerate(_DATE_PATTERNS):
+        for pat, mode in _DATE_PATTERNS:
             m = pat.search(line)
             if m:
-                found = _to_date(m, era=(i > 0))
+                found = _to_date(m, mode)
                 if found:
                     return found
     return None
@@ -323,6 +329,53 @@ def parse_document(
         )
 
     result.entries.append(_entry(total, debit_tax, description, note))
+    return result
+
+
+def parse_receipt_clusters(
+    clusters: list[list[str]],
+    source_name: str = "",
+    custom_expense_rules: list[tuple[str, str]] | None = None,
+) -> ParseResult:
+    """1枚の写真から分割した複数レシートを解析してまとめる。
+
+    1枚のレシートが複数のかたまりに割れることがある（売上票と領収書が
+    同じ用紙に印字されている等）ため、同額の仕訳は1件にまとめ、日付を
+    読み取れた方を残す。分割結果は判断が難しいため全件を要確認にする。
+    """
+    result = ParseResult()
+    best_by_amount: dict[int, tuple[JournalEntry, bool]] = {}
+    duplicates: list[int] = []
+
+    for texts in clusters:
+        partial = parse_document(
+            texts, "領収書", source_name=source_name,
+            custom_expense_rules=custom_expense_rules,
+        )
+        date_guessed = any("日付" in w for w in partial.warnings)
+        for e in partial.entries:
+            e.needs_review = True
+            previous = best_by_amount.get(e.amount)
+            if previous is None:
+                best_by_amount[e.amount] = (e, date_guessed)
+            else:
+                duplicates.append(e.amount)
+                if previous[1] and not date_guessed:
+                    best_by_amount[e.amount] = (e, date_guessed)
+        # 断片から金額が取れないのは分割の副産物なので通知しない
+        result.warnings.extend(
+            w for w in partial.warnings if "金額を検出できません" not in w
+        )
+
+    result.entries.extend(e for e, _ in best_by_amount.values())
+    result.entries.sort(key=lambda e: e.date)
+    if duplicates:
+        amounts_text = "・".join(f"{a:,}円" for a in sorted(set(duplicates)))
+        result.warnings.append(
+            f"同じ金額（{amounts_text}）の仕訳が複数検出されたため1件にまとめました。"
+            "1枚のレシートが分割された可能性が高いですが、"
+            "実際に同額のレシートが複数ある場合は表で行を追加してください。"
+        )
     return result
 
 
