@@ -278,6 +278,42 @@ def test_receipt_ic_card_balance_excluded():
     assert e.debit_account == "旅費交通費"  # タクシー
 
 
+def test_receipt_labels_and_amounts_in_separate_blocks():
+    """縦書きレシートの実OCR: 項目名と金額が離れたブロックに読み出される。
+
+    同じ行での「残高」除外が効かないため、最も多く現れる金額
+    （＝合計。この受領証では¥3200が4回、残高¥8085は1回）を採る。
+    """
+    lines = [
+        "車番", "取引", "取引通番", "カード番号", "加盟店名·", "合計金額",
+        "電話番号.", "通行料他", "基本運賃", "運賃料金計", "交通系残高",
+        "03-3743-0401", "伝票番号.012255", "交通系支払額",
+        "御利用 日.2026/06/20", "えびす自動車(株)",
+        "¥3200円", "No.0789", "¥3200円", "¥3200円", "¥3200円",
+        "¥8085円", "000", "¥0円",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 3200, f"残高8085を拾ってしまった: {e.amount}"
+    assert e.date == date(2026, 6, 20)
+    # 先頭の断片「車番」ではなく会社名を摘要に使う
+    assert e.description == "えびす自動車(株)"
+
+
+def test_store_name_prefers_company_over_fragment():
+    """縦書きレシートでOCRが断片を先頭に読み出しても会社名を摘要にする。"""
+    from doc_parser import _find_store_name
+
+    # 会社表記を最優先
+    assert _find_store_name(
+        ["APL", "AID", "NPC24H新宿3丁目パーキング", "日本パーキング株式会社"]
+    ) == "日本パーキング株式会社"
+    # 会社表記がなければ店名らしい語を含む行
+    assert _find_store_name(["カー", "Visa", "エコロパーク 恵比寿第1"]) == "エコロパーク 恵比寿第1"
+    # どちらもなければ従来どおり冒頭の行
+    assert _find_store_name(["よろずや", "2026/07/01", "合計 ¥500"]) == "よろずや"
+
+
 def test_image_compression():
     import io as _io
 

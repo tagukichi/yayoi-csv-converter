@@ -104,6 +104,12 @@ _STORE_NAME_SKIP = (
 _TADASHI_PATTERN = re.compile(r"但し?[、,]?\s*(.{2,25}?)\s*として")
 
 
+# 会社名・店名の目印。縦書きレシートではOCRが「カー」「車番」のような
+# 断片を先頭に読み出すため、これらを含む行を優先して摘要に使う。
+_COMPANY_MARKERS = ("株式会社", "(株)", "（株）", "有限会社", "合同会社", "㈱", "㈲")
+_STORE_MARKERS = ("店", "パーク", "パーキング", "駅", "館", "商店", "屋", "自動車", "ホテル")
+
+
 def _store_name_candidate(text: str) -> bool:
     text = text.strip()
     if len(text) < 2:
@@ -123,11 +129,17 @@ def _store_name_candidate(text: str) -> bool:
 def _find_store_name(lines: list[str]) -> str | None:
     """OCR結果から店舗名らしき行を探す。
 
-    レシートは先頭付近、手書きの領収証は下部の発行者欄に店名があることが
-    多いため、まず冒頭8行、次に末尾12行を逆順で探す。それでも見つからない
-    場合は、書類内に2回以上現れる行（ロゴと領収書欄の両方に印字される
-    店名によくあるパターン）を候補にする。
+    まず書類全体から会社名・店名の目印を含む行を探す（縦書きレシートでは
+    OCRが「カー」「車番」のような断片を先頭に読み出すため、位置より
+    名前らしさを優先する）。見つからなければレシート先頭付近、手書きの
+    領収証の発行者欄（末尾）、最後に2回以上現れる行（ロゴと領収書欄の
+    両方に印字される店名のパターン）の順に探す。
     """
+    for markers in (_COMPANY_MARKERS, _STORE_MARKERS):
+        for line in lines:
+            text = line.strip()
+            if len(text) >= 4 and any(m in text for m in markers) and _store_name_candidate(text):
+                return text
     for line in lines[:8]:
         if _store_name_candidate(line):
             return line.strip()
@@ -208,8 +220,15 @@ def _rate_target_amount(lines: list[str], rate: str) -> int | None:
 
 
 def _find_total(lines: list[str]) -> int | None:
-    """合計金額を探す。「合計」等のキーワード行の近く（同じ行〜2行先）を優先し、
-    見つからなければ全金額の最大値を使う。"""
+    """合計金額を探す。
+
+    「合計」等のキーワード行の近く（同じ行〜2行先）を優先する。
+    見つからない場合は最も多く現れる金額を採る。レシートは合計額を
+    複数回印字する（小計・合計・支払額・運賃料金計など）のに対し、
+    交通系ICの残高のような紛らわしい金額は1回しか出ないため。
+    縦書きレシートではOCRが項目名と金額を離れた位置に読み出すため、
+    同じ行での除外キーワード判定が効かないケースの保険でもある。
+    """
     all_amounts: list[int] = []
     keyword_hits: list[int] = []
     for i, line in enumerate(lines):
@@ -228,7 +247,11 @@ def _find_total(lines: list[str]) -> int | None:
     if keyword_hits:
         return max(keyword_hits)  # 「小計」より「合計」が大きい前提で最大を採る
     if all_amounts:
-        return max(all_amounts)
+        counts: dict[int, int] = {}
+        for a in all_amounts:
+            counts[a] = counts.get(a, 0) + 1
+        # 出現回数が多いもの、同数なら金額が大きいものを採る
+        return max(counts, key=lambda a: (counts[a], a))
     return None
 
 
