@@ -220,6 +220,29 @@ def test_receipt_mixed_tax_split():
     assert any("分割" in w for w in result.warnings)
 
 
+def test_receipt_reduced_tax_with_jumbled_ocr_order():
+    """OCRの行順が乱れて8%対象の金額が拾えなくても、10%の記載が
+    どこにもなければ全額軽減8%とみなす（もあ小麦館・実OCRの症状を再現）。"""
+    lines = [
+        "もあ 小麦館",
+        "登録番号 T5020001076479",
+        "2026年 5月19日 (火) 15:04",
+        "塩あんバター",
+        "¥237",
+        "合計",
+        "¥197",
+        "(税率 8%対象額",
+        "*は軽減税率対象です",  # 金額が近くにない＝内訳が拾えない状態
+        "もあ 小麦館",
+        "川崎市宮前区有馬5-1-1",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 197
+    assert e.debit_tax == "課対仕入込軽減8%"  # 10%の記載なし → 全額軽減
+    assert "もあ 小麦館" in e.description  # 2回出現する行を店名とみなす
+
+
 def test_image_compression():
     import io as _io
 

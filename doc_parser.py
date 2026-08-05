@@ -107,7 +107,9 @@ def _find_store_name(lines: list[str]) -> str | None:
     """OCR結果から店舗名らしき行を探す。
 
     レシートは先頭付近、手書きの領収証は下部の発行者欄に店名があることが
-    多いため、まず冒頭8行、見つからなければ末尾12行を逆順で探す。
+    多いため、まず冒頭8行、次に末尾12行を逆順で探す。それでも見つからない
+    場合は、書類内に2回以上現れる行（ロゴと領収書欄の両方に印字される
+    店名によくあるパターン）を候補にする。
     """
     for line in lines[:8]:
         if _store_name_candidate(line):
@@ -115,6 +117,14 @@ def _find_store_name(lines: list[str]) -> str | None:
     for line in reversed(lines[-12:]):
         if _store_name_candidate(line):
             return line.strip()
+    seen: dict[str, int] = {}
+    for line in lines:
+        text = line.strip()
+        if _store_name_candidate(text):
+            seen[text] = seen.get(text, 0) + 1
+    for text, count in seen.items():
+        if count >= 2:
+            return text
     return None
 
 
@@ -162,11 +172,14 @@ def _amounts_in(line: str) -> list[int]:
 
 
 def _rate_target_amount(lines: list[str], rate: str) -> int | None:
-    """「8%対象 ¥1,410」「10%対象￥0-」のような税率別内訳の金額を探す。"""
+    """「8%対象 ¥1,410」「10%対象￥0-」のような税率別内訳の金額を探す。
+
+    OCRの行順が乱れることがあるため、対象行の少し先（3行）まで金額を探す。
+    """
     pat = re.compile(rf"{rate}\s*[%％]")
     for i, line in enumerate(lines):
         if pat.search(line) and "対象" in line:
-            for near in lines[i : i + 2]:
+            for near in lines[i : i + 4]:
                 m = re.search(r"[¥￥]\s*([\d,，.．]+)|(\d{1,3}(?:[,，.．]\d{3})+)", near)
                 if m:
                     token = _SEPARATORS.sub("", (m.group(1) or m.group(2))).strip()
@@ -271,7 +284,10 @@ def parse_document(
     if reduced_hint and debit_tax == "課対仕入込10%":
         amount8 = _rate_target_amount(lines, "8")
         amount10 = _rate_target_amount(lines, "10")
-        if amount8 == total or amount10 == 0:
+        # 書類のどこにも10%の記載がなければ全額軽減8%とみなす
+        # （OCRの行順の乱れで内訳金額を拾えなくても判定できるようにする）
+        no_ten_percent = not re.search(r"10\s*[%％]", text)
+        if amount8 == total or amount10 == 0 or (no_ten_percent and amount10 is None):
             result.entries.append(
                 _entry(total, "課対仕入込軽減8%", description, note)
             )
