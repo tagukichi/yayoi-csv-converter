@@ -241,18 +241,50 @@ if st.button("変換を開始", type="primary"):
                             ocr_lines = run_ocr_lines(file_bytes)
                         texts = [ln.text for ln in ocr_lines]
 
+                        # 領収書×写真は、複数レシートの可能性を最優先で確認する。
+                        # 駐車場領収書等は「カード利用明細」等の印字を含み、書類
+                        # タイプの自動判定がカード明細に誤反応するため、複数の
+                        # かたまりを検出したら自動判定より分割解析を優先する
+                        receipt_clusters = None
+                        if document_type == "領収書" and is_image_filename(f.name):
+                            _clusters = split_text_clusters(ocr_lines)
+                            if len(_clusters) > 1:
+                                receipt_clusters = _clusters
+
                         # 書類タイプの選び間違い対策: OCR内容から自動判定し、
                         # 選択と食い違っていれば判定結果の方で解析する
                         effective_type = document_type
-                        detected = detect_document_type(texts)
-                        if detected and detected != document_type:
-                            effective_type = detected
-                            st.info(
-                                f"書類の内容から「{detected}」と判定して解析しました"
-                                f"（書類タイプの選択は「{document_type}」でした）。"
-                            )
+                        if receipt_clusters is None:
+                            detected = detect_document_type(texts)
+                            if detected and detected != document_type:
+                                effective_type = detected
+                                st.info(
+                                    f"書類の内容から「{detected}」と判定して解析しました"
+                                    f"（書類タイプの選択は「{document_type}」でした）。"
+                                )
 
-                        if effective_type == "給与台帳":
+                        if receipt_clusters is not None:
+                            st.info(
+                                f"1枚の画像から {len(receipt_clusters)} 件のレシートを検出し、"
+                                "それぞれ解析しました（分割結果はすべて要確認です）。"
+                            )
+                            result = ParseResult()
+                            for cluster in receipt_clusters:
+                                partial = parse_document(
+                                    [ln.text for ln in cluster],
+                                    "領収書",
+                                    source_name=f.name,
+                                    custom_expense_rules=learned_expense,
+                                )
+                                for e in partial.entries:
+                                    e.needs_review = True
+                                result.entries.extend(partial.entries)
+                                result.warnings.extend(partial.warnings)
+                            preview = "\n\n――― レシート区切り ―――\n\n".join(
+                                "\n".join(ln.text for ln in cluster)
+                                for cluster in receipt_clusters
+                            )
+                        elif effective_type == "給与台帳":
                             rows = group_rows(ocr_lines)
                             result = parse_payroll(rows, source_name=f.name)
                             preview = "\n".join(
@@ -270,40 +302,11 @@ if st.button("変換を開始", type="primary"):
                                 " | ".join(c.text for c in row) for row in rows
                             )
                         else:
-                            # 写真の領収書は、1枚に複数写っている場合に備えて
-                            # 座標のかたまりごとに分割してそれぞれ解析する
-                            clusters = (
-                                split_text_clusters(ocr_lines)
-                                if effective_type == "領収書" and is_image_filename(f.name)
-                                else [ocr_lines]
+                            result = parse_document(
+                                texts, effective_type, source_name=f.name,
+                                custom_expense_rules=learned_expense,
                             )
-                            if len(clusters) > 1:
-                                st.info(
-                                    f"1枚の画像から {len(clusters)} 件のレシートを検出し、"
-                                    "それぞれ解析しました（分割結果はすべて要確認です）。"
-                                )
-                                result = ParseResult()
-                                for cluster in clusters:
-                                    partial = parse_document(
-                                        [ln.text for ln in cluster],
-                                        effective_type,
-                                        source_name=f.name,
-                                        custom_expense_rules=learned_expense,
-                                    )
-                                    for e in partial.entries:
-                                        e.needs_review = True
-                                    result.entries.extend(partial.entries)
-                                    result.warnings.extend(partial.warnings)
-                                preview = "\n\n――― レシート区切り ―――\n\n".join(
-                                    "\n".join(ln.text for ln in cluster)
-                                    for cluster in clusters
-                                )
-                            else:
-                                result = parse_document(
-                                    texts, effective_type, source_name=f.name,
-                                    custom_expense_rules=learned_expense,
-                                )
-                                preview = "\n".join(texts)
+                            preview = "\n".join(texts)
                         for w in result.warnings:
                             st.warning(w)
                         added = storage.add_entries(client, result.entries, source_file=f.name)

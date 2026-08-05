@@ -243,6 +243,41 @@ def test_receipt_reduced_tax_with_jumbled_ocr_order():
     assert "もあ 小麦館" in e.description  # 2回出現する行を店名とみなす
 
 
+def test_receipt_shinkansen_spaced_amount():
+    """新幹線領収書（実OCR）: 「¥12. 050円」のスペース入り金額と
+    「2026年 6月13日」のスペース入り日付を読める。"""
+    lines = [
+        "領収書-No", "763",
+        "東海旅客鉄道株式会社", "2026年 6月13日",
+        "但し、乗車券類(クレジット扱い)として",
+        "「消費税等込み ·10%」", "¥12. 050円",
+        "名古屋駅", "登録番号:T3180001031569",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 12050
+    assert e.date == date(2026, 6, 13)
+    assert e.debit_account == "旅費交通費"  # 鉄道 → 旅費交通費
+    assert e.credit_account == "未払金"  # クレジット扱い
+    assert e.debit_tax == "課対仕入込10%"  # 10%明記 → 軽減にしない
+
+
+def test_receipt_ic_card_balance_excluded():
+    """交通系IC領収書（実OCR）: 「交通系残高 ¥8085円」を合計と誤認しない。"""
+    lines = [
+        "交通系 ICカード売上票",
+        "えびす自動車株式会社",
+        "御利用 日.2026/06/20",
+        "合計金額 ¥3200円",
+        "交通系支払額 ¥3200円",
+        "交通系残高 ¥8085円",
+    ]
+    result = parse_document(lines, "領収書")
+    e = result.entries[0]
+    assert e.amount == 3200  # 残高8085ではなく合計
+    assert e.debit_account == "旅費交通費"  # タクシー
+
+
 def test_image_compression():
     import io as _io
 
