@@ -10,7 +10,7 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ocr import OcrLine, group_rows  # noqa: E402
-from parser import parse_table_document  # noqa: E402
+from doc_parser import parse_table_document  # noqa: E402
 
 
 def _line(text, x, y, page=1, height=10.0):
@@ -244,7 +244,7 @@ def test_bankbook_year_rollover():
 
 def test_payroll_ledger():
     """給与台帳（会計事務所のサンプルPDFの実数値）から諸口仕訳一式を起こす。"""
-    from parser import parse_payroll
+    from doc_parser import parse_payroll
 
     def label_row(y, label):
         return _row(y, *[(10 + i * 60, label) for i in range(3)])
@@ -319,7 +319,7 @@ def test_payroll_ledger():
 
 def test_payroll_ledger_imbalance_flagged():
     """諸口の貸借が合わない（読み取り誤り想定）場合は全行要確認。"""
-    from parser import parse_payroll
+    from doc_parser import parse_payroll
 
     rows = [
         _row(10, (10, "2026年 給与台帳"), (100, "支給月分 6月")),

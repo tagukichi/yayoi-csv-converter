@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import storage  # noqa: E402
 from models import JournalEntry  # noqa: E402
-from parser import parse_document  # noqa: E402
+from doc_parser import parse_document  # noqa: E402
 
 # ユーザー提供の見積書PDFのOCR結果（抜粋）
 SAMPLE_QUOTE_LINES = [
@@ -269,7 +269,7 @@ def test_multi_receipt_clustering():
 
 
 def test_detect_document_type():
-    from parser import detect_document_type
+    from doc_parser import detect_document_type
 
     card_lines = [
         "楽天カード ご利用明細", "カード名義: ○○建設株式会社",

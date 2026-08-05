@@ -17,7 +17,7 @@ from ocr import (
     run_ocr_lines,
     split_text_clusters,
 )
-from parser import (
+from doc_parser import (
     detect_document_type,
     parse_document,
     parse_payroll,
