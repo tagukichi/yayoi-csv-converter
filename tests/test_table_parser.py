@@ -242,6 +242,96 @@ def test_bankbook_year_rollover():
     assert result.entries[1].date == date(2027, 1, 5)
 
 
+def test_payroll_ledger():
+    """給与台帳（会計事務所のサンプルPDFの実数値）から諸口仕訳一式を起こす。"""
+    from parser import parse_payroll
+
+    def label_row(y, label):
+        return _row(y, *[(10 + i * 60, label) for i in range(3)])
+
+    def amount_row(y, *amounts):
+        return _row(y, *[(10 + i * 60, a) for i, a in enumerate(amounts)])
+
+    rows = [
+        _row(10, (10, "令和3年度給与"), (200, "給与台帳")),
+        _row(30, (10, "支給月分")),
+        _row(40, (10, "12月"), (70, "12月"), (130, "12月"), (190, "合計")),
+        label_row(60, "基本給"),
+        amount_row(70, "1,000,000", "300,000", "3,204,000"),
+        label_row(90, "①月例給与計"),
+        amount_row(100, "1,000,000", "300,000", "3,206,656"),
+        label_row(110, "②非課税分賃金額"),
+        label_row(120, "③支給額合計（①＋②）"),
+        amount_row(130, "1,000,000", "300,000", "3,206,656"),
+        label_row(150, "健康保険"),
+        amount_row(160, "57,771", "17,685", "188,050"),
+        label_row(170, "厚生年金保険及び基金掛金等"),
+        amount_row(180, "59,475", "27,450", "261,690"),
+        label_row(190, "雇用保険"),
+        amount_row(200, "1,224", "1,632", "7,616"),
+        label_row(210, "④小計"),
+        amount_row(220, "117,246", "45,135", "457,356"),
+        label_row(230, "⑤差引控除後の金額①－④"),
+        amount_row(240, "882,754", "254,865", "2,749,300"),
+        label_row(250, "所得税"),
+        amount_row(260, "106,507", "6,750", "166,987"),
+        label_row(270, "市民村民税"),
+        amount_row(280, "60,900", "12,000", "160,700"),
+        label_row(290, "土建組合等"),
+        label_row(300, "社員旅行積立"),
+        label_row(310, "⑥小計"),
+        amount_row(320, "167,407", "18,750", "327,687"),
+        label_row(330, "⑦源泉所得税還付金"),
+        amount_row(340, "396,884", "12,700", "459,936"),
+        label_row(350, "差引支給額③－④－⑥＋⑦"),
+        amount_row(360, "1,112,231", "248,815", "2,881,549"),
+        _row(380, (10, "単価"), (70, "17000"), (130, "17000")),
+    ]
+    result = parse_payroll(rows)
+
+    by_desc = {e.description: e for e in result.entries}
+    assert len(result.entries) == 7  # 非課税・土建・積立は0のため出ない
+
+    e = by_desc["12月分給与"]
+    assert (e.debit_account, e.credit_account, e.amount) == ("給与手当", "諸口", 3206656)
+    assert e.date == date(2021, 12, 31)  # 令和3年度の12月 → 月末・発生主義
+    assert e.debit_tax == "対象外"  # 給与は不課税
+
+    shakai = by_desc["12月分給与 社会保険料"]
+    assert shakai.amount == 188050 + 261690  # 健保＋厚年の合算
+    assert (shakai.credit_account, shakai.credit_sub) == ("預り金", "社会保険")
+
+    assert by_desc["12月分給与 雇用保険料"].credit_sub == "労働保険"
+    assert by_desc["12月分給与 源泉所得税"].amount == 166987
+    assert by_desc["12月分給与 住民税"].amount == 160700
+
+    refund = by_desc["12月分給与 源泉所得税還付"]
+    assert (refund.debit_account, refund.debit_sub, refund.credit_account) == ("預り金", "源泉所得税", "諸口")
+    assert refund.amount == 459936
+
+    net = by_desc["12月分給与 差引支給額"]
+    assert (net.credit_account, net.credit_sub, net.amount) == ("未払費用", "給料", 2881549)
+
+    # 諸口の貸借一致 → 全行チェック不要
+    assert all(e.needs_review is False for e in result.entries)
+    assert not any("諸口" in w for w in result.warnings)
+
+
+def test_payroll_ledger_imbalance_flagged():
+    """諸口の貸借が合わない（読み取り誤り想定）場合は全行要確認。"""
+    from parser import parse_payroll
+
+    rows = [
+        _row(10, (10, "2026年 給与台帳"), (100, "支給月分 6月")),
+        _row(30, (10, "①月例給与計"), (100, "300,000")),
+        _row(50, (10, "差引支給額"), (100, "250,000")),  # 控除なしなのに合わない
+    ]
+    result = parse_payroll(rows)
+    assert len(result.entries) == 2
+    assert all(e.needs_review for e in result.entries)
+    assert any("諸口の貸借" in w for w in result.warnings)
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):

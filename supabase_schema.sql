@@ -16,8 +16,10 @@ create table if not exists entries (
   client text not null,
   date text not null,                          -- YYYY/MM/DD
   debit_account text not null,                 -- 借方勘定科目
+  debit_sub text not null default '',          -- 借方補助科目
   debit_tax text not null default '対象外',    -- 借方税区分
   credit_account text not null,                -- 貸方勘定科目
+  credit_sub text not null default '',         -- 貸方補助科目
   credit_tax text not null default '対象外',   -- 貸方税区分
   amount bigint not null,                      -- 金額（円）
   description text not null default '',        -- 摘要
@@ -25,6 +27,10 @@ create table if not exists entries (
   source_file text not null default '',        -- 出典ファイル名
   created_at timestamptz not null default now()
 );
+
+-- 既にテーブルを作成済みの場合は以下で補助科目列を追加する
+alter table entries add column if not exists debit_sub text not null default '';
+alter table entries add column if not exists credit_sub text not null default '';
 
 create index if not exists entries_client_idx on entries (client, date);
 

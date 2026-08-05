@@ -17,7 +17,12 @@ from ocr import (
     run_ocr_lines,
     split_text_clusters,
 )
-from parser import detect_document_type, parse_document, parse_table_document
+from parser import (
+    detect_document_type,
+    parse_document,
+    parse_payroll,
+    parse_table_document,
+)
 from yayoi_exporter import to_yayoi_csv
 
 load_dotenv()
@@ -181,7 +186,7 @@ if not credentials_available():
 
 document_type = st.selectbox(
     "書類タイプ",
-    ["領収書", "電子請求書", "通帳", "カード明細"],
+    ["領収書", "電子請求書", "通帳", "カード明細", "給与台帳"],
 )
 
 uploaded_files = st.file_uploader(
@@ -247,7 +252,13 @@ if st.button("変換を開始", type="primary"):
                                 f"（書類タイプの選択は「{document_type}」でした）。"
                             )
 
-                        if effective_type in ("通帳", "カード明細"):
+                        if effective_type == "給与台帳":
+                            rows = group_rows(ocr_lines)
+                            result = parse_payroll(rows, source_name=f.name)
+                            preview = "\n".join(
+                                " | ".join(c.text for c in row) for row in rows
+                            )
+                        elif effective_type in ("通帳", "カード明細"):
                             # 座標で表の行を復元してから解析する
                             rows = group_rows(ocr_lines)
                             result = parse_table_document(
@@ -467,7 +478,9 @@ else:
                     JournalEntry(
                         date=datetime.strptime(str(row["取引日付"]).strip(), "%Y/%m/%d").date(),
                         debit_account=str(row["借方勘定科目"]).strip(),
+                        debit_sub=str(row.get("借方補助科目", "") or "").strip(),
                         credit_account=str(row["貸方勘定科目"]).strip(),
+                        credit_sub=str(row.get("貸方補助科目", "") or "").strip(),
                         amount=int(row["金額"]),
                         description=str(row["摘要"]).strip(),
                         debit_tax=str(row["借方税区分"]).strip() or "対象外",
@@ -497,8 +510,8 @@ else:
                     {
                         "No": i,
                         "取引日付": e.date.strftime("%Y/%m/%d"),
-                        "借方科目": e.debit_account,
-                        "貸方科目": e.credit_account,
+                        "借方科目": e.debit_account + (f"（{e.debit_sub}）" if e.debit_sub else ""),
+                        "貸方科目": e.credit_account + (f"（{e.credit_sub}）" if e.credit_sub else ""),
                         "金額": f"{e.amount:,}",
                         "摘要": e.description,
                     }

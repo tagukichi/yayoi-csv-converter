@@ -25,7 +25,8 @@ DEFAULT_CLIENTS = ["A建設", "B工務店", "C社"]
 
 # data_editor での表示順・編集対象の列。DB の列と一対一。
 EDITABLE_COLUMNS = [
-    "取引日付", "借方勘定科目", "借方税区分", "貸方勘定科目", "貸方税区分",
+    "取引日付", "借方勘定科目", "借方補助科目", "借方税区分",
+    "貸方勘定科目", "貸方補助科目", "貸方税区分",
     "金額", "摘要", "要確認", "出典ファイル",
 ]
 
@@ -35,8 +36,10 @@ CREATE TABLE IF NOT EXISTS entries (
     client TEXT NOT NULL,
     date TEXT NOT NULL,
     debit_account TEXT NOT NULL,
+    debit_sub TEXT NOT NULL DEFAULT '',
     debit_tax TEXT NOT NULL DEFAULT '対象外',
     credit_account TEXT NOT NULL,
+    credit_sub TEXT NOT NULL DEFAULT '',
     credit_tax TEXT NOT NULL DEFAULT '対象外',
     amount INTEGER NOT NULL,
     description TEXT NOT NULL DEFAULT '',
@@ -102,8 +105,10 @@ def _entry_to_record(client: str, e: JournalEntry, source_file: str) -> dict:
         "client": client,
         "date": e.date.strftime("%Y/%m/%d"),
         "debit_account": e.debit_account,
+        "debit_sub": e.debit_sub,
         "debit_tax": e.debit_tax,
         "credit_account": e.credit_account,
+        "credit_sub": e.credit_sub,
         "credit_tax": e.credit_tax,
         "amount": e.amount,
         "description": e.description,
@@ -117,8 +122,10 @@ def _row_to_record(client: str, r: pd.Series) -> dict:
         "client": client,
         "date": str(r["取引日付"]).strip(),
         "debit_account": str(r["借方勘定科目"]).strip(),
+        "debit_sub": str(r.get("借方補助科目", "") or "").strip(),
         "debit_tax": str(r["借方税区分"]).strip() or "対象外",
         "credit_account": str(r["貸方勘定科目"]).strip(),
+        "credit_sub": str(r.get("貸方補助科目", "") or "").strip(),
         "credit_tax": str(r["貸方税区分"]).strip() or "対象外",
         "amount": int(r["金額"]),
         "description": str(r["摘要"]).strip(),
@@ -130,8 +137,10 @@ def _row_to_record(client: str, r: pd.Series) -> dict:
 _JP_COLUMNS = {
     "date": "取引日付",
     "debit_account": "借方勘定科目",
+    "debit_sub": "借方補助科目",
     "debit_tax": "借方税区分",
     "credit_account": "貸方勘定科目",
+    "credit_sub": "貸方補助科目",
     "credit_tax": "貸方税区分",
     "amount": "金額",
     "description": "摘要",
@@ -154,6 +163,12 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_SQL)
     conn.execute(_CREATE_CLIENTS_SQL)
     conn.execute(_CREATE_RULES_SQL)
+    # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
+    if "debit_sub" not in existing_cols:
+        conn.execute("ALTER TABLE entries ADD COLUMN debit_sub TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE entries ADD COLUMN credit_sub TEXT NOT NULL DEFAULT ''")
+        conn.commit()
     # 初回のみ既定の企業を登録する（user_version を「初期化済み」フラグに使う。
     # 全企業を削除しても勝手に復活しないようにするため）
     if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
@@ -222,17 +237,19 @@ def add_entries(
     with _connect(db_path) as conn:
         conn.executemany(
             """INSERT INTO entries
-               (client, date, debit_account, debit_tax,
-                credit_account, credit_tax, amount, description,
+               (client, date, debit_account, debit_sub, debit_tax,
+                credit_account, credit_sub, credit_tax, amount, description,
                 needs_review, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     client,
                     e.date.strftime("%Y/%m/%d"),
                     e.debit_account,
+                    e.debit_sub,
                     e.debit_tax,
                     e.credit_account,
+                    e.credit_sub,
                     e.credit_tax,
                     e.amount,
                     e.description,
@@ -257,8 +274,10 @@ def load_entries(client: str, db_path: Path = DB_PATH) -> pd.DataFrame:
         df = pd.read_sql_query(
             """SELECT date AS 取引日付,
                       debit_account AS 借方勘定科目,
+                      debit_sub AS 借方補助科目,
                       debit_tax AS 借方税区分,
                       credit_account AS 貸方勘定科目,
+                      credit_sub AS 貸方補助科目,
                       credit_tax AS 貸方税区分,
                       amount AS 金額,
                       description AS 摘要,
@@ -291,8 +310,10 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
                 client,
                 str(r["取引日付"]).strip(),
                 str(r["借方勘定科目"]).strip(),
+                str(r.get("借方補助科目", "") or "").strip(),
                 str(r["借方税区分"]).strip() or "対象外",
                 str(r["貸方勘定科目"]).strip(),
+                str(r.get("貸方補助科目", "") or "").strip(),
                 str(r["貸方税区分"]).strip() or "対象外",
                 int(r["金額"]),
                 str(r["摘要"]).strip(),
@@ -303,10 +324,10 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
         ]
         conn.executemany(
             """INSERT INTO entries
-               (client, date, debit_account, debit_tax,
-                credit_account, credit_tax, amount, description,
+               (client, date, debit_account, debit_sub, debit_tax,
+                credit_account, credit_sub, credit_tax, amount, description,
                 needs_review, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
     return len(rows)

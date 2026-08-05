@@ -34,6 +34,7 @@ _DOC_TYPE_SIGNALS = {
     "通帳": ("普通預金", "お預り金額", "お支払金額", "差引残高", "繰越", "通帳", "当座預金"),
     "領収書": ("領収書", "領収証", "レシート", "お買上", "お釣り", "上様"),
     "電子請求書": ("請求書", "御請求書", "御見積", "お振込先", "振込期日", "支払期日"),
+    "給与台帳": ("給与台帳", "給料台帳", "支給月分", "月例給与計", "差引支給額", "非課税分賃金"),
 }
 
 
@@ -355,7 +356,8 @@ def _parse_cell_amount(text: str) -> int | None:
     記号付きにも対応。金額でなければ None。"""
     t = text.strip().strip("*＊ ").replace("¥", "").replace("￥", "").replace("円", "")
     t = t.replace(",", "").replace(" ", "")
-    if not t.isdigit():
+    # isdigit() は丸数字（⑦）等も True になるため ASCII 数字に限定する
+    if not (t.isascii() and t.isdigit()):
         return None
     value = int(t)
     if value > 1_000_000_000:
@@ -637,6 +639,163 @@ def _parse_card(
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
+
+
+# --- 給与台帳の解析 ---
+#
+# 会計事務所の指示に基づき、給与台帳の「合計」列から諸口勘定を相手にした
+# 仕訳一式を起こす（発生主義: 支給月分の月末日付）:
+#   給与手当/諸口、旅費交通費(非課税分)/諸口、
+#   諸口/預り金(社会保険・労働保険・源泉所得税・住民税・土建組合・社員積立)、
+#   預り金(源泉所得税)/諸口（還付）、諸口/未払費用(給料)
+# 最後に諸口の貸借一致を検算し、合わなければ全行要確認にする。
+
+_SHOKUCHI = "諸口"
+
+# (正規化テキストに含まれるキーワード, 除外キーワード, 項目キー) の順に判定
+_PAYROLL_LABELS = [
+    ("月例給与計", (), "salary"),
+    ("非課税分賃金", (), "nontaxable"),
+    ("健康保険", (), "health"),
+    ("厚生年金", (), "pension"),
+    ("雇用保険", (), "employment"),
+    ("所得税", ("還付",), "income_tax"),
+    ("市民村民税", (), "resident_tax"),
+    ("市民税", (), "resident_tax"),
+    ("住民税", (), "resident_tax"),
+    ("土建組合", (), "dokken"),
+    ("社員旅行積立", (), "tsumitate"),
+    ("源泉所得税還付", (), "refund"),
+    ("差引支給額", (), "net_pay"),
+]
+
+# 金額行を無視すべき見出し（対象外の集計行など）
+_PAYROLL_IGNORE_LABELS = ("支給額合計", "小計", "差引控除後", "単価", "日数", "残業単価", "残業時間", "基本給", "役職手当", "手当")
+
+
+def _payroll_month_end(rows: list[list[OcrLine]], result: ParseResult) -> date:
+    """給与台帳の「支給月分」と年の記載から月末日付を決める（発生主義）。"""
+    import calendar
+
+    all_text = " ".join(c.text for cells in rows for c in cells)
+    year = None
+    is_nendo = "年度" in all_text
+    m = re.search(r"令和\s*(\d{1,2})\s*年", all_text)
+    if m:
+        year = int(m.group(1)) + 2018
+    else:
+        m = re.search(r"(20\d{2})\s*年", all_text)
+        if m:
+            year = int(m.group(1))
+
+    month = None
+    m = re.search(r"支給月分\s*(\d{1,2})\s*月", all_text)
+    if m:
+        month = int(m.group(1))
+    else:
+        # 「12月」が従業員数ぶん並ぶ行（支給月分の行）を探す
+        for cells in rows:
+            months = [c.text for c in cells if re.fullmatch(r"\d{1,2}月", c.text.strip())]
+            if len(months) >= 2:
+                month = int(months[0].rstrip("月"))
+                break
+
+    if month is None:
+        month = date.today().month
+        result.warnings.append("支給月分を特定できなかったため今月と仮定しました。日付を確認してください。")
+    if year is None:
+        year = date.today().year
+        result.warnings.append("年を特定できなかったため本年と仮定しました。日付を確認してください。")
+    elif is_nendo and month <= 3:
+        year += 1  # 年度表記の1〜3月は翌暦年
+
+    return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def parse_payroll(rows: list[list[OcrLine]], source_name: str = "") -> ParseResult:
+    """給与台帳（従業員別の列＋合計列）から給与仕訳一式を起こす。"""
+    result = ParseResult()
+    entry_date = _payroll_month_end(rows, result)
+
+    # 「ラベル行 → 金額行」の並びを前提に、合計列（行の右端の金額）を拾う
+    values: dict[str, int] = {}
+    pending: str | None = None
+    for cells in rows:
+        normalized = "".join(c.text for c in cells).replace(" ", "").replace("　", "")
+        amounts = [a for c in cells if (a := _parse_cell_amount(c.text)) is not None]
+
+        label_key = None
+        for keyword, excludes, key in _PAYROLL_LABELS:
+            if keyword in normalized and not any(ex in normalized for ex in excludes):
+                label_key = key
+                break
+
+        if label_key is not None:
+            if amounts:  # ラベルと金額が同じ行にあるレイアウト
+                values.setdefault(label_key, amounts[-1])
+                pending = None
+            else:
+                pending = label_key
+            continue
+
+        if any(ig in normalized for ig in _PAYROLL_IGNORE_LABELS):
+            pending = None
+            continue
+
+        if amounts and pending is not None:
+            values.setdefault(pending, amounts[-1])
+            pending = None
+
+    if "salary" not in values:
+        result.warnings.append(
+            "給与台帳から「①月例給与計」を読み取れませんでした。レイアウトの調整が必要です"
+            "（OCR結果を共有してください）。"
+        )
+        return result
+
+    month_label = f"{entry_date.month}月分給与"
+
+    def add(debit, debit_sub, credit, credit_sub, amount, desc):
+        if not amount:
+            return
+        result.entries.append(
+            JournalEntry(
+                date=entry_date,
+                debit_account=debit,
+                debit_sub=debit_sub,
+                credit_account=credit,
+                credit_sub=credit_sub,
+                amount=amount,
+                description=desc,
+                debit_tax=yayoi_tax(debit),
+                credit_tax=yayoi_tax(credit),
+            )
+        )
+
+    add("給与手当", "", _SHOKUCHI, "", values.get("salary", 0), month_label)
+    add("旅費交通費", "", _SHOKUCHI, "", values.get("nontaxable", 0), f"{month_label} 非課税通勤費")
+    add(_SHOKUCHI, "", "預り金", "社会保険",
+        values.get("health", 0) + values.get("pension", 0), f"{month_label} 社会保険料")
+    add(_SHOKUCHI, "", "預り金", "労働保険", values.get("employment", 0), f"{month_label} 雇用保険料")
+    add(_SHOKUCHI, "", "預り金", "源泉所得税", values.get("income_tax", 0), f"{month_label} 源泉所得税")
+    add(_SHOKUCHI, "", "預り金", "住民税", values.get("resident_tax", 0), f"{month_label} 住民税")
+    add(_SHOKUCHI, "", "預り金", "土建組合", values.get("dokken", 0), f"{month_label} 土建組合費")
+    add(_SHOKUCHI, "", "預り金", "社員積立", values.get("tsumitate", 0), f"{month_label} 社員旅行積立")
+    add("預り金", "源泉所得税", _SHOKUCHI, "", values.get("refund", 0), f"{month_label} 源泉所得税還付")
+    add(_SHOKUCHI, "", "未払費用", "給料", values.get("net_pay", 0), f"{month_label} 差引支給額")
+
+    # 諸口の貸借一致を検算（通帳の残高チェックと同じ思想の品質担保）
+    shokuchi_debit = sum(e.amount for e in result.entries if e.debit_account == _SHOKUCHI)
+    shokuchi_credit = sum(e.amount for e in result.entries if e.credit_account == _SHOKUCHI)
+    if shokuchi_debit != shokuchi_credit:
+        for e in result.entries:
+            e.needs_review = True
+            e.note = "諸口の貸借不一致"
+        result.warnings.append(
+            f"諸口の貸借が一致しません（借方 {shokuchi_debit:,} 円 / 貸方 {shokuchi_credit:,} 円）。"
+            "読み取り誤りの可能性があるため全行を要確認にしました。"
+        )
+    return result
 
 
 def parse_table_document(
