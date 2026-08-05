@@ -234,11 +234,18 @@ def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
     if len(lines) < 2:
         return [lines] if lines else []
 
-    heights = sorted(ln.height for ln in lines)
-    mh = heights[len(heights) // 2] or 1.0
+    def box(ln: OcrLine) -> tuple[float, float, float, float]:
+        w = ln.width if ln.width > 0 else len(ln.text) * ln.height * 0.6
+        return (ln.x, ln.y - ln.height / 2, ln.x + w, ln.y + ln.height / 2)
 
-    def width_of(ln: OcrLine) -> float:
-        return ln.width if ln.width > 0 else len(ln.text) * mh * 0.6
+    boxes = [box(ln) for ln in lines]
+
+    # 文字の大きさの目安。横向きに撮影された（テキストが90度回転した）
+    # レシートでは外接矩形の高さが「行の長さ」になってしまうため、
+    # 短い方の辺を文字サイズとみなす（回転に依存しない尺度）。
+    sizes = sorted(min(b[2] - b[0], b[3] - b[1]) for b in boxes)
+    scale = sizes[len(sizes) // 2] or 1.0
+    tol = 3.0 * scale
 
     parent = list(range(len(lines)))
 
@@ -251,15 +258,17 @@ def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
     def union(i: int, j: int) -> None:
         parent[find(i)] = find(j)
 
+    # 矩形同士の隙間（重なっていれば 0）で近さを測る。中心間距離では、
+    # 回転して細長くなった行同士を誤って遠いと判定してしまうため。
     for i in range(len(lines)):
+        ax0, ay0, ax1, ay1 = boxes[i]
         for j in range(i + 1, len(lines)):
-            a, b = lines[i], lines[j]
-            if a.page != b.page:
+            if lines[i].page != lines[j].page:
                 continue
-            dy = abs(a.y - b.y)
-            ax2, bx2 = a.x + width_of(a), b.x + width_of(b)
-            dx = max(0.0, max(a.x, b.x) - min(ax2, bx2))
-            if dy < 3.0 * mh and dx < 3.0 * mh:
+            bx0, by0, bx1, by1 = boxes[j]
+            dx = max(0.0, max(ax0, bx0) - min(ax1, bx1))
+            dy = max(0.0, max(ay0, by0) - min(ay1, by1))
+            if dx < tol and dy < tol:
                 union(i, j)
 
     groups: dict[int, list[OcrLine]] = {}

@@ -303,6 +303,68 @@ def test_image_compression():
     assert pdf == big and note3 is None
 
 
+def test_multi_receipt_clustering_rotated():
+    """横向きに撮影されたレシート（テキストが90度回転）でも分割できる。
+
+    実機では4枚のレシートを横向きに並べて撮影した写真が1かたまりに
+    融合し、カード明細として誤解析されていた。回転すると外接矩形の
+    高さが「行の長さ」になるため、短い辺を文字サイズとして扱う。
+    """
+    from ocr import OcrLine, split_text_clusters
+
+    def V(text, band_top, x):
+        """回転したテキスト行: 幅=文字サイズ、高さ=行の長さ。"""
+        length = 300.0
+        return OcrLine(
+            text=text, x=x, y=band_top + length / 2,
+            height=length, page=1, width=12.0,
+        )
+
+    # 4枚のレシートが縦に並び、各レシートの中でテキストは横方向に並ぶ
+    lines = []
+    for k, (band, texts) in enumerate(
+        [
+            (0, ["領収書", "エコロパーク恵比寿第1", "2026/06/08 17:49", "合計 1,600円"]),
+            (400, ["領収書", "日本パーキング株式会社", "2026年06月24日", "請求金額 3,960円"]),
+            (800, ["交通系ICカード売上票", "えびす自動車株式会社", "御利用 日.2026/06/20", "合計金額 ¥3200円"]),
+            (1200, ["領収書", "東海旅客鉄道株式会社", "2026年 6月13日", "¥12. 050円"]),
+        ]
+    ):
+        for i, t in enumerate(texts):
+            lines.append(V(t, band, 20.0 + i * 25))
+
+    clusters = split_text_clusters(lines)
+    assert len(clusters) == 4, f"4枚に分割されるはずが {len(clusters)} 件"
+
+    amounts = []
+    for cluster in clusters:
+        r = parse_document([ln.text for ln in cluster], "領収書")
+        amounts.append(r.entries[0].amount)
+    assert sorted(amounts) == [1600, 3200, 3960, 12050]
+
+
+def test_detect_does_not_override_receipt_on_weak_signal():
+    """駐車場の領収書に「クレジットカードご利用明細」等が印字されていても、
+    わずかな一致でカード明細と誤判定しない（実機の誤解析を再現）。"""
+    from doc_parser import detect_document_type
+
+    parking = [
+        "領収書", "NPC24H新宿3丁目パーキング", "日本パーキング株式会社",
+        "登録番号 T7010001068319", "消費税率 内税10%",
+        "◆クレジットカードご利用明細◆", "カード番号 IC ************ 0590",
+        "請求金額 3,960円", "出庫時間 06月24日 14:09",
+    ]
+    assert detect_document_type(parking, selected="領収書") != "カード明細"
+
+    # 本物のカード明細は「領収書」を選んでいても正しく上書き判定できる
+    card = [
+        "楽天カード ご利用明細", "カード名義: ○○建設株式会社",
+        "カード番号: **** 1234", "お支払い月: 2026年7月",
+        "利用日", "利用店名・商品名", "支払方法", "利用金額",
+    ]
+    assert detect_document_type(card, selected="領収書") == "カード明細"
+
+
 def test_multi_receipt_clustering():
     from ocr import OcrLine, split_text_clusters
 

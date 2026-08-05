@@ -30,7 +30,8 @@ CREDIT_ACCOUNT_BY_DOC_TYPE = {
 # 書類タイプの自動判定に使うキーワード。書類タイプの選び間違い
 # （初期値の「領収書」のままカード明細をアップ等）を検出するため。
 _DOC_TYPE_SIGNALS = {
-    "カード明細": ("ご利用明細", "利用明細", "カード番号", "カード名義", "利用店名", "支払方法", "お支払い月", "利用金額", "回払い"),
+    # 「利用明細」は「ご利用明細」と二重に一致するため入れない
+    "カード明細": ("ご利用明細", "ご利用代金明細", "カード名義", "利用店名", "支払方法", "お支払い月", "利用金額", "回払い"),
     "通帳": ("普通預金", "お預り金額", "お支払金額", "差引残高", "繰越", "通帳", "当座預金"),
     "領収書": ("領収書", "領収証", "レシート", "お買上", "お釣り", "上様"),
     "電子請求書": ("請求書", "御請求書", "御見積", "お振込先", "振込期日", "支払期日"),
@@ -38,15 +39,27 @@ _DOC_TYPE_SIGNALS = {
 }
 
 
-def detect_document_type(lines: list[str]) -> str | None:
-    """OCRテキストから書類タイプを推定する。確信が持てなければ None。"""
+# 利用者が選んだ書類タイプへの加点（明示的な選択も証拠として扱う）
+_SELECTED_TYPE_BONUS = 2
+
+
+def detect_document_type(lines: list[str], selected: str | None = None) -> str | None:
+    """OCRテキストから書類タイプを推定する。確信が持てなければ None。
+
+    利用者が選んだ書類タイプを上書きする用途なので、判定は慎重に行う。
+    駐車場の領収書に「クレジットカードご利用明細」と印字されている等、
+    他タイプの語がわずかに混じるケースで誤って上書きしないよう、
+    選択されたタイプに加点したうえで、2位に明確な差（2語以上）を
+    付けた場合だけ判定を返す。
+    """
     text = " ".join(lines)
     scores = {t: sum(1 for kw in kws if kw in text) for t, kws in _DOC_TYPE_SIGNALS.items()}
+    if selected in scores:
+        scores[selected] += _SELECTED_TYPE_BONUS
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     best_type, best = ranked[0]
     second = ranked[1][1]
-    # 2個以上のキーワードが一致し、かつ2位に明確な差があるときだけ判定する
-    if best >= 2 and best > second:
+    if best >= 3 and best - second >= 2:
         return best_type
     return None
 

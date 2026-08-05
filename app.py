@@ -255,7 +255,7 @@ if st.button("変換を開始", type="primary"):
                         # 選択と食い違っていれば判定結果の方で解析する
                         effective_type = document_type
                         if receipt_clusters is None:
-                            detected = detect_document_type(texts)
+                            detected = detect_document_type(texts, selected=document_type)
                             if detected and detected != document_type:
                                 effective_type = detected
                                 st.info(
