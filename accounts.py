@@ -154,15 +154,27 @@ _SALES_TAX_STRINGS = {
 }
 
 
+# 科目名から貸借対照表科目と判定する目印（完成工事未収入金・工事未払金など、
+# 会社ごとの科目にも対応するため名称ベースでも判定する）
+_BS_MARKERS = (
+    "預金", "未収", "未払", "売掛", "買掛", "立替", "預り", "借入",
+    "仮受", "仮払", "前受", "前渡", "積金", "手形", "貸付",
+)
+# 収益科目の目印（当期完成工事高・リフォーム工事売上高など）
+_SALES_MARKERS = ("売上", "完成工事高", "雑収入")
+
+
 def yayoi_tax(account: str) -> str:
     """勘定科目から弥生の税区分文字列（税込処理）の既定値を返す。
 
     BS科目→対象外、収益科目→売上側の区分、それ以外（費用科目）→仕入側の区分。
     未知の科目は費用・課税10%とみなす（画面で修正可能）。
     """
-    if account in BS_ACCOUNTS:
+    if account in BS_ACCOUNTS or any(m in account for m in _BS_MARKERS):
         return "対象外"
     if account in INCOME_TAX_CATEGORY:
         return _SALES_TAX_STRINGS[INCOME_TAX_CATEGORY[account]]
+    if any(m in account for m in _SALES_MARKERS):
+        return _SALES_TAX_STRINGS["課税"]
     category = EXPENSE_TAX_CATEGORY.get(account, "課税")
     return _PURCHASE_TAX_STRINGS[category]

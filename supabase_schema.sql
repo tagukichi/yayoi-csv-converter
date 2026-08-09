@@ -34,6 +34,17 @@ alter table entries add column if not exists credit_sub text not null default ''
 
 create index if not exists entries_client_idx on entries (client, date);
 
+-- クライアント別の補助科目マスタ（弥生の補助科目一覧表から取り込む「事前登録」）
+create table if not exists subaccounts (
+  id bigint generated always as identity primary key,
+  client text not null,
+  account text not null,
+  sub_name text not null,
+  search_key text not null default '',
+  created_at timestamptz not null default now(),
+  unique (client, account, sub_name)
+);
+
 -- 一括置換から学習した「摘要キーワード → 勘定科目」ルール
 -- side: expense=借方（費用）, income=貸方（収益）
 create table if not exists account_rules (

@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS clients (
 )
 """
 
+# クライアント別の補助科目マスタ（弥生の補助科目一覧表から取り込む「事前登録」）
+_CREATE_SUBACCOUNTS_SQL = """
+CREATE TABLE IF NOT EXISTS subaccounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    account TEXT NOT NULL,
+    sub_name TEXT NOT NULL,
+    search_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, account, sub_name)
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -163,6 +176,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_SQL)
     conn.execute(_CREATE_CLIENTS_SQL)
     conn.execute(_CREATE_RULES_SQL)
+    conn.execute(_CREATE_SUBACCOUNTS_SQL)
     # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
@@ -368,6 +382,60 @@ def delete_entries_by_source(client: str, source_file: str, db_path: Path = DB_P
             (client, source_file),
         )
         return cur.rowcount
+
+
+def list_subaccounts(
+    client: str, account: str | None = None, db_path: Path = DB_PATH
+) -> list[dict]:
+    """クライアントの補助科目マスタを返す。account 指定でその科目に絞る。"""
+    if _supabase_enabled(db_path):
+        q = _sb().table("subaccounts").select("*").eq("client", client)
+        if account:
+            q = q.eq("account", account)
+        return q.order("id").execute().data
+    with _connect(db_path) as conn:
+        sql = "SELECT id, account, sub_name, search_key FROM subaccounts WHERE client = ?"
+        params: list = [client]
+        if account:
+            sql += " AND account = ?"
+            params.append(account)
+        rows = conn.execute(sql + " ORDER BY id", params).fetchall()
+    return [
+        {"id": r[0], "account": r[1], "sub_name": r[2], "search_key": r[3]}
+        for r in rows
+    ]
+
+
+def replace_subaccounts(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:
+    """クライアントの補助科目マスタを一括で置き換える。登録件数を返す。"""
+    seen: set[tuple[str, str]] = set()
+    cleaned = []
+    for r in records:
+        account = str(r.get("account", "")).strip()
+        sub_name = str(r.get("sub_name", "")).strip()
+        if not account or not sub_name or (account, sub_name) in seen:
+            continue
+        seen.add((account, sub_name))
+        cleaned.append(
+            {
+                "client": client,
+                "account": account,
+                "sub_name": sub_name,
+                "search_key": str(r.get("search_key", "") or "").strip().lower(),
+            }
+        )
+    if _supabase_enabled(db_path):
+        _sb().table("subaccounts").delete().eq("client", client).execute()
+        if cleaned:
+            _sb().table("subaccounts").insert(cleaned).execute()
+        return len(cleaned)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM subaccounts WHERE client = ?", (client,))
+        conn.executemany(
+            "INSERT INTO subaccounts (client, account, sub_name, search_key) VALUES (?, ?, ?, ?)",
+            [(c["client"], c["account"], c["sub_name"], c["search_key"]) for c in cleaned],
+        )
+    return len(cleaned)
 
 
 def list_account_rules(db_path: Path = DB_PATH) -> list[dict]:

@@ -139,6 +139,8 @@ with st.expander("📖 使い方", expanded=True):
 # マネーフォワード / freee は対応実装後に選択肢へ戻す（コードは温存して非表示）
 ACCOUNTING_SOFTWARE_OPTIONS = ["弥生"]  # + ["マネーフォワード", "freee"]
 
+from submaster import match_subaccount, parse_yayoi_subaccount_pdf  # noqa: E402
+
 # --- サイドバー ---
 with st.sidebar:
     st.header("設定")
@@ -185,10 +187,72 @@ if not credentials_available():
         "（`.env.example` 参照）。"
     )
 
+# --- 事前登録: クライアント別の補助科目マスタ ---
+with st.expander("🗂 事前登録：補助科目マスタ（クライアント別）"):
+    st.caption(
+        f"「{client}」の補助科目を登録すると、通帳の摘要から取引先の補助科目を"
+        "自動で振り分けます。弥生の「補助科目一覧表」PDFをアップすると一括登録できます。"
+    )
+    if sub_flash := st.session_state.pop("sub_flash", None):
+        st.success(sub_flash)
+
+    sub_pdf = st.file_uploader(
+        "補助科目一覧表PDF（弥生から出力したもの）", type=["pdf"], key="sub_pdf"
+    )
+    if sub_pdf is not None and st.button("PDFから一括登録", key="sub_import"):
+        try:
+            records = parse_yayoi_subaccount_pdf(sub_pdf.getvalue())
+            if not records:
+                st.error("補助科目を読み取れませんでした。弥生の「補助科目一覧表」PDFか確認してください。")
+            else:
+                saved = storage.replace_subaccounts(client, records)
+                st.session_state["sub_flash"] = (
+                    f"{saved} 件の補助科目を登録しました（既存のマスタは置き換え）。"
+                )
+                st.rerun()
+        except Exception as e:
+            st.error(f"PDFの読み取りに失敗しました: {e}")
+
+    master = storage.list_subaccounts(client)
+    if master:
+        master_df = pd.DataFrame(master)[["account", "sub_name", "search_key"]].rename(
+            columns={"account": "勘定科目", "sub_name": "補助科目", "search_key": "サーチキー"}
+        )
+        st.caption(f"登録済み: {len(master)} 件")
+    else:
+        master_df = pd.DataFrame(columns=["勘定科目", "補助科目", "サーチキー"])
+        st.caption("まだ登録されていません。PDFのアップロードか、下の表への手入力で登録できます。")
+    edited_master = st.data_editor(
+        master_df, num_rows="dynamic", use_container_width=True, key="sub_editor"
+    )
+    if st.button("マスタの変更を保存", key="sub_save"):
+        saved = storage.replace_subaccounts(
+            client,
+            [
+                {"account": r["勘定科目"], "sub_name": r["補助科目"], "search_key": r["サーチキー"]}
+                for _, r in edited_master.iterrows()
+            ],
+        )
+        st.session_state["sub_flash"] = f"{saved} 件を保存しました。"
+        st.rerun()
+
 document_type = st.selectbox(
     "書類タイプ",
     ["領収書", "電子請求書", "通帳", "カード明細", "給与台帳"],
 )
+
+# 通帳のときは、補助科目マスタ（普通預金）に登録された銀行から口座を選べる
+bank_sub = None
+if document_type == "通帳":
+    _banks = [r["sub_name"] for r in storage.list_subaccounts(client, "普通預金")]
+    if _banks:
+        _bank_choice = st.selectbox(
+            "銀行（通帳の口座）",
+            ["（指定なし）"] + _banks,
+            help="選んだ銀行が、仕訳の普通預金側の補助科目に入ります。",
+        )
+        if _bank_choice != "（指定なし）":
+            bank_sub = _bank_choice
 
 uploaded_files = st.file_uploader(
     "ファイルをアップロード（複数選択できます）",
@@ -295,6 +359,42 @@ if st.button("変換を開始", type="primary"):
                             preview = "\n".join(
                                 " | ".join(c.text for c in row) for row in rows
                             )
+                            if effective_type == "通帳":
+                                # 銀行（口座）の補助科目と、摘要↔補助科目マスタの突合
+                                subs_master = storage.list_subaccounts(client)
+                                matched_count = 0
+                                for e in result.entries:
+                                    is_deposit = e.debit_account == "普通預金"
+                                    if bank_sub:
+                                        if is_deposit:
+                                            e.debit_sub = bank_sub
+                                        elif e.credit_account == "普通預金":
+                                            e.credit_sub = bank_sub
+                                    if not subs_master:
+                                        continue
+                                    matched = match_subaccount(
+                                        e.description, subs_master,
+                                        side="deposit" if is_deposit else "withdrawal",
+                                    )
+                                    if matched:
+                                        matched_count += 1
+                                        if is_deposit:
+                                            e.credit_account = matched["account"]
+                                            e.credit_sub = matched["sub_name"]
+                                            e.credit_tax = yayoi_tax(matched["account"])
+                                        else:
+                                            e.debit_account = matched["account"]
+                                            e.debit_sub = matched["sub_name"]
+                                            e.debit_tax = yayoi_tax(matched["account"])
+                                        # 名前の直接一致は確定扱い。サーチキー経由は
+                                        # 略称ゆえ誤マッチがあり得るため要確認を残す。
+                                        # 残高不一致・年仮定（note あり）の行も残す
+                                        if matched["by"] == "name" and not e.note:
+                                            e.needs_review = False
+                                if matched_count:
+                                    st.caption(
+                                        f"🔎 補助科目マスタと {matched_count} 件の摘要が一致しました。"
+                                    )
                         else:
                             result = parse_document(
                                 texts, effective_type, source_name=f.name,
