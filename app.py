@@ -188,53 +188,111 @@ if not credentials_available():
     )
 
 # --- 事前登録: クライアント別の補助科目マスタ ---
-with st.expander("🗂 事前登録：補助科目マスタ（クライアント別）"):
-    st.caption(
-        f"「{client}」の補助科目を登録すると、通帳の摘要から取引先の補助科目を"
-        "自動で振り分けます。弥生の「補助科目一覧表」PDFをアップすると一括登録できます。"
+_master = storage.list_subaccounts(client)
+_master_label = f"補助科目マスタ — {client}（{len(_master)} 件登録済み）" if _master else f"補助科目マスタ — {client}（未登録）"
+
+with st.expander(f"🗂 事前登録：{_master_label}"):
+    st.markdown(
+        "通帳の摘要（「フリコミ タマケンセツ」など）から、取引先の勘定科目・補助科目を"
+        "**自動で振り分ける**ための登録です。クライアント企業ごとに登録します。"
     )
     if sub_flash := st.session_state.pop("sub_flash", None):
         st.success(sub_flash)
 
-    sub_pdf = st.file_uploader(
-        "補助科目一覧表PDF（弥生から出力したもの）", type=["pdf"], key="sub_pdf"
-    )
-    if sub_pdf is not None and st.button("PDFから一括登録", key="sub_import"):
-        try:
-            records = parse_yayoi_subaccount_pdf(sub_pdf.getvalue())
-            if not records:
-                st.error("補助科目を読み取れませんでした。弥生の「補助科目一覧表」PDFか確認してください。")
-            else:
-                saved = storage.replace_subaccounts(client, records)
-                st.session_state["sub_flash"] = (
-                    f"{saved} 件の補助科目を登録しました（既存のマスタは置き換え）。"
-                )
-                st.rerun()
-        except Exception as e:
-            st.error(f"PDFの読み取りに失敗しました: {e}")
+    tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
 
-    master = storage.list_subaccounts(client)
-    if master:
-        master_df = pd.DataFrame(master)[["account", "sub_name", "search_key"]].rename(
-            columns={"account": "勘定科目", "sub_name": "補助科目", "search_key": "サーチキー"}
+    # --- PDFから一括登録 ---
+    with tab_pdf_import:
+        st.markdown(
+            """
+            **手順**
+            1. 弥生会計で［集計表］→［補助科目一覧表］を **PDF出力** します
+            2. そのPDFを下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+            """
         )
-        st.caption(f"登録済み: {len(master)} 件")
-    else:
-        master_df = pd.DataFrame(columns=["勘定科目", "補助科目", "サーチキー"])
-        st.caption("まだ登録されていません。PDFのアップロードか、下の表への手入力で登録できます。")
-    edited_master = st.data_editor(
-        master_df, num_rows="dynamic", use_container_width=True, key="sub_editor"
-    )
-    if st.button("マスタの変更を保存", key="sub_save"):
-        saved = storage.replace_subaccounts(
-            client,
-            [
+        sub_pdf = st.file_uploader(
+            "補助科目一覧表のPDF", type=["pdf"], key="sub_pdf",
+            label_visibility="collapsed",
+        )
+        if sub_pdf is not None:
+            try:
+                pdf_records = parse_yayoi_subaccount_pdf(sub_pdf.getvalue())
+            except Exception as e:
+                pdf_records = []
+                st.error(f"PDFの読み取りに失敗しました: {e}")
+            if not pdf_records:
+                st.error(
+                    "補助科目を読み取れませんでした。"
+                    "弥生の「補助科目一覧表」のPDFかどうか確認してください。"
+                )
+            else:
+                # 登録前に読み取り結果を見せて、確認してから登録してもらう
+                st.success(f"✅ {len(pdf_records)} 件の補助科目を読み取りました。内容を確認してください:")
+                summary = (
+                    pd.DataFrame(pdf_records)
+                    .groupby("account", sort=False)
+                    .agg(件数=("sub_name", "count"), 補助科目の例=("sub_name", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
+                    .rename_axis("勘定科目")
+                )
+                st.dataframe(summary, use_container_width=True)
+                overwrite_note = (
+                    f"※ 登録すると「{client}」の既存のマスタ（{len(_master)}件）は置き換えられます。"
+                    if _master else ""
+                )
+                if overwrite_note:
+                    st.caption(overwrite_note)
+                if st.button(f"この {len(pdf_records)} 件を登録する", type="primary", key="sub_import"):
+                    saved = storage.replace_subaccounts(client, pdf_records)
+                    st.session_state["sub_flash"] = f"✅ {saved} 件の補助科目を登録しました。"
+                    st.rerun()
+
+    # --- 登録内容の確認・編集 ---
+    with tab_master_list:
+        if not _master:
+            st.info(
+                "まだ登録されていません。「📄 PDFから一括登録」タブで弥生のPDFを"
+                "アップするか、下の表に直接入力して「保存」を押してください。"
+            )
+            master_view = pd.DataFrame(columns=["勘定科目", "補助科目", "サーチキー"])
+            account_filter = "すべて"
+        else:
+            accounts_in_master = list(dict.fromkeys(r["account"] for r in _master))
+            account_filter = st.selectbox(
+                "表示する勘定科目で絞り込み",
+                ["すべて"] + [f"{a}（{sum(1 for r in _master if r['account'] == a)}件）" for a in accounts_in_master],
+                key="sub_filter",
+            )
+            selected_account = None
+            if account_filter != "すべて":
+                selected_account = account_filter.rsplit("（", 1)[0]
+            shown = [r for r in _master if selected_account is None or r["account"] == selected_account]
+            master_view = pd.DataFrame(shown)[["account", "sub_name", "search_key"]].rename(
+                columns={"account": "勘定科目", "sub_name": "補助科目", "search_key": "サーチキー"}
+            )
+
+        edited_master = st.data_editor(
+            master_view, num_rows="dynamic", use_container_width=True, key="sub_editor",
+            column_config={
+                "勘定科目": st.column_config.TextColumn(help="例: 普通預金、完成工事未収入金、工事未払金"),
+                "補助科目": st.column_config.TextColumn(help="例: 川崎信用金庫、㈱ケイズ"),
+                "サーチキー": st.column_config.TextColumn(help="弥生のサーチキー英字。通帳のカタカナ摘要との照合に使います"),
+            },
+        )
+        if st.button("💾 変更を保存", key="sub_save"):
+            edited_records = [
                 {"account": r["勘定科目"], "sub_name": r["補助科目"], "search_key": r["サーチキー"]}
                 for _, r in edited_master.iterrows()
-            ],
-        )
-        st.session_state["sub_flash"] = f"{saved} 件を保存しました。"
-        st.rerun()
+            ]
+            if _master and account_filter != "すべて":
+                # 絞り込み表示中は、表示していない科目の登録内容を保持したまま
+                # 表示分だけを差し替える
+                selected_account = account_filter.rsplit("（", 1)[0]
+                kept = [r for r in _master if r["account"] != selected_account]
+                edited_records = kept + edited_records
+            saved = storage.replace_subaccounts(client, edited_records)
+            st.session_state["sub_flash"] = f"✅ {saved} 件を保存しました。"
+            st.rerun()
 
 document_type = st.selectbox(
     "書類タイプ",
@@ -253,6 +311,11 @@ if document_type == "通帳":
         )
         if _bank_choice != "（指定なし）":
             bank_sub = _bank_choice
+    else:
+        st.caption(
+            "💡 上の「🗂 事前登録」で普通預金の補助科目（銀行名）を登録すると、"
+            "ここで口座を選べるようになります。"
+        )
 
 uploaded_files = st.file_uploader(
     "ファイルをアップロード（複数選択できます）",
