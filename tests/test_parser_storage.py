@@ -408,6 +408,38 @@ def test_receipt_clusters_dedup_split_receipt():
     assert taxi.date == date(2026, 6, 20)
 
 
+def test_multi_receipt_clustering_adjacent():
+    """レシート同士が近接して置かれて1かたまりに融合しても、登録番号
+    （T+13桁）が複数見つかれば、しきい値を狭めて再分割する。
+
+    実機では縦置き4枚の写真が融合し、摘要に隣のレシートの会社名が
+    入っていた。
+    """
+    from ocr import OcrLine, split_text_clusters
+
+    def L(text, x, y):
+        return OcrLine(text=text, x=x, y=y, height=10.0, page=1, width=90.0)
+
+    # 2枚のレシートが横に並び、隙間は 25px（しきい値 3.0×10=30 より狭い
+    # ため初回は融合するが、再分割の 0.55倍しきい値で分かれる）
+    receipt_a = [
+        L("領収書", 0, 0), L("セブン-イレブン川崎古川町店", 0, 12),
+        L("登録番号T2020002085580", 0, 24), L("2026/07/06", 0, 36),
+        L("合計 ¥321", 0, 48),
+    ]
+    receipt_b = [
+        L("領収証", 115, 0), L("パークエステート駐車場", 115, 12),
+        L("登録番号T3120001177863", 115, 24), L("2026/07/08", 115, 36),
+        L("料金計 2,500円", 115, 48),
+    ]
+    clusters = split_text_clusters(receipt_a + receipt_b)
+    assert len(clusters) == 2, f"2枚に分割されるはずが {len(clusters)} 件"
+
+    texts_per_cluster = ["\n".join(l.text for l in c) for c in clusters]
+    assert any("セブン-イレブン" in t and "パークエステート" not in t for t in texts_per_cluster)
+    assert any("パークエステート" in t and "セブン-イレブン" not in t for t in texts_per_cluster)
+
+
 def test_multi_receipt_clustering_rotated():
     """横向きに撮影されたレシート（テキストが90度回転）でも分割できる。
 

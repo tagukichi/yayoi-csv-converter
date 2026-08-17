@@ -332,10 +332,67 @@ reimport_ok = st.checkbox(
     key="reimport_ok",
 )
 
+# 仕訳表（data_editor）の状態管理。DBを書き換える操作の後は key を変えて
+# エディタを作り直す（古い編集状態が新しい行に誤って適用されるのを防ぐ）
+st.session_state.setdefault("ledger_rev", 0)
+
+
+def _ledger_editor_key() -> str:
+    return f"ledger_editor_{st.session_state['ledger_rev']}"
+
+
+def _bump_ledger() -> None:
+    st.session_state["ledger_rev"] += 1
+
+
+def _persist_pending_edits(target_client: str) -> bool:
+    """仕訳表の未保存の編集（「変更を保存」前のもの）をDBに書き込む。
+
+    表を編集したまま次のファイルを取り込むと編集が消える、という事故を
+    防ぐため、取り込みの直前に呼ぶ。保存した場合 True を返す。
+    """
+    state = st.session_state.get(_ledger_editor_key())
+    if not state:
+        return False
+    edited = state.get("edited_rows") or {}
+    added = state.get("added_rows") or []
+    deleted = state.get("deleted_rows") or []
+    if not (edited or added or deleted):
+        return False
+
+    df = storage.load_entries(target_client)
+    for row_idx, changes in edited.items():
+        row_idx = int(row_idx)
+        if row_idx < len(df):
+            for col, value in changes.items():
+                if col in df.columns:
+                    df.iloc[row_idx, df.columns.get_loc(col)] = value
+    if deleted:
+        removed = {int(d) for d in deleted}
+        df = df.iloc[[i for i in range(len(df)) if i not in removed]]
+    for row in added:
+        base = {
+            "取引日付": datetime.now().strftime("%Y/%m/%d"),
+            "借方勘定科目": "", "借方補助科目": "", "借方税区分": "対象外",
+            "貸方勘定科目": "", "貸方補助科目": "", "貸方税区分": "対象外",
+            "金額": 0, "摘要": "", "要確認": True, "出典ファイル": "",
+        }
+        base.update({k: v for k, v in row.items() if k in base})
+        df = pd.concat([df, pd.DataFrame([base])], ignore_index=True)
+    try:
+        storage.replace_entries(target_client, df)
+        return True
+    except Exception:
+        return False
+
+
 if st.button("変換を開始", type="primary"):
     if not uploaded_files:
         st.warning("ファイルをアップロードしてください。")
     else:
+        # 表の編集が「変更を保存」前でも消えないよう、先に自動保存する
+        if _persist_pending_edits(client):
+            st.info("💾 仕訳表の未保存の編集を自動保存してから取り込みます。")
         progress = st.progress(0.0)
         added_total = 0
         # 一括置換から学習したルール（組み込みルールより優先して科目を決める）
@@ -482,6 +539,7 @@ if st.button("変換を開始", type="primary"):
             progress.progress((i + 1) / len(uploaded_files))
 
         if added_total:
+            _bump_ledger()  # 新しい台帳内容でエディタを作り直す
             st.success(f"合計 {added_total} 件の仕訳を「{client}」の台帳に追加しました。下の表で確認・修正してください。")
 
 # --- 蓄積された仕訳データ ---
@@ -513,7 +571,7 @@ else:
                 "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
                 "出典ファイル": st.column_config.TextColumn(disabled=True),
             },
-            key="ledger_editor",
+            key=_ledger_editor_key(),
         )
 
         col_save, col_review, col_clear = st.columns([1, 1, 1])
@@ -522,6 +580,7 @@ else:
                 try:
                     saved = storage.replace_entries(client, edited_df)
                     st.success(f"{saved} 件を保存しました。")
+                    _bump_ledger()
                     st.rerun()
                 except Exception as e:
                     st.error(f"保存に失敗しました: {e}")
@@ -531,11 +590,13 @@ else:
                 cleared = edited_df.copy()
                 cleared["要確認"] = False
                 storage.replace_entries(client, cleared)
+                _bump_ledger()
                 st.rerun()
         with col_clear:
             confirm_clear = st.checkbox("全削除を許可", key="confirm_clear")
             if st.button("🗑 台帳を全削除", disabled=not confirm_clear):
                 storage.clear_entries(client)
+                _bump_ledger()
                 st.rerun()
 
         # --- 科目の一括置換（学習機能付き） ---
@@ -577,6 +638,7 @@ else:
                             )
                             message += " ルールを学習しました（次回の変換から自動適用）。"
                         st.session_state["flash"] = message
+                        _bump_ledger()
                         st.rerun()
 
             learned_rules = storage.list_account_rules()
@@ -609,6 +671,7 @@ else:
                 if st.button("取り込みを取り消す", disabled=not confirm_undo, key="undo_file_btn"):
                     deleted = storage.delete_entries_by_source(client, selected_name)
                     st.session_state["flash"] = f"「{selected_name}」の仕訳 {deleted} 件を削除しました。"
+                    _bump_ledger()
                     st.rerun()
 
     # --- 出力プレビュータブ ---

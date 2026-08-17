@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -223,13 +224,30 @@ def group_rows(lines: list[OcrLine]) -> list[list[OcrLine]]:
     return rows
 
 
-def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
+# レシート1枚ごとに1回だけ現れる痕跡（適格請求書の登録番号・領収書見出し）
+_RECEIPT_REG_NUMBER = re.compile(r"T\d{13}")
+
+
+def _receipt_marker_count(texts: list[str]) -> int:
+    joined = " ".join(texts)
+    reg_numbers = len(set(_RECEIPT_REG_NUMBER.findall(joined)))
+    ryoshu_lines = sum(1 for t in texts if "領収" in t)
+    return max(reg_numbers, ryoshu_lines)
+
+
+def split_text_clusters(
+    lines: list[OcrLine], _tol_factor: float = 3.0, _depth: int = 0
+) -> list[list[OcrLine]]:
     """1枚の画像内で空間的に離れたテキストのかたまりに分割する。
 
     複数のレシートを1枚の写真に収めた場合に、レシートごとのグループへ
     分ける用途。行同士が縦横とも近ければ同じグループとみなす
     （Union-Find による連結成分）。数行しかない小さなグループは
     誤分割とみなして最寄りのグループに併合する。
+
+    レシート同士が近接して置かれていると1つのかたまりに融合するため、
+    1かたまりに「登録番号（T+13桁）」や「領収」見出しが複数見つかった
+    場合は、しきい値を狭めて再分割を試みる。
     """
     if len(lines) < 2:
         return [lines] if lines else []
@@ -245,7 +263,7 @@ def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
     # 短い方の辺を文字サイズとみなす（回転に依存しない尺度）。
     sizes = sorted(min(b[2] - b[0], b[3] - b[1]) for b in boxes)
     scale = sizes[len(sizes) // 2] or 1.0
-    tol = 3.0 * scale
+    tol = _tol_factor * scale
 
     parent = list(range(len(lines)))
 
@@ -299,6 +317,18 @@ def split_text_clusters(lines: list[OcrLine]) -> list[list[OcrLine]]:
             clusters.remove(small)
             merged = True
             break
+
+    # 1かたまりに複数レシートの痕跡があれば、しきい値を狭めて再分割を試みる
+    if _depth < 3:
+        refined: list[list[OcrLine]] = []
+        for cluster in clusters:
+            texts = [ln.text for ln in cluster]
+            if len(cluster) >= 8 and _receipt_marker_count(texts) >= 2:
+                sub = split_text_clusters(cluster, _tol_factor * 0.55, _depth + 1)
+                refined.extend(sub if len(sub) > 1 else [cluster])
+            else:
+                refined.append(cluster)
+        clusters = refined
 
     clusters.sort(key=lambda c: (min(l.page for l in c), min(l.y for l in c), min(l.x for l in c)))
     for c in clusters:
