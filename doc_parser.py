@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date
 
 from accounts import (
@@ -157,8 +158,11 @@ def _find_store_name(lines: list[str]) -> str | None:
     return None
 
 
-# 支払手段がクレジットカードなら、貸方は現金ではなく未払金にする
-_CREDIT_PAYMENT_KEYWORDS = ("クレジット", "credit", "visa", "mastercard", "jcb", "amex")
+# 支払手段がクレジットカード（後払い型電子マネー含む）なら、
+# 貸方は現金ではなく未払金にする
+_CREDIT_PAYMENT_KEYWORDS = (
+    "クレジット", "credit", "visa", "mastercard", "jcb", "amex", "quicpay",
+)
 
 
 def _to_date(m: re.Match, mode: str) -> date | None:
@@ -263,6 +267,10 @@ def parse_document(
 ) -> ParseResult:
     """OCRテキスト行を書類タイプに応じて仕訳データに変換する。"""
     result = ParseResult()
+
+    # コンビニのレシート等は数字・％が全角で印字される（「１０％対象 ￥１，６４２」）
+    # ことがあるため、全角英数記号を半角に正規化してから解析する
+    lines = [unicodedata.normalize("NFKC", line) for line in lines]
 
     if document_type not in CREDIT_ACCOUNT_BY_DOC_TYPE:
         result.warnings.append(

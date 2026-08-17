@@ -314,6 +314,40 @@ def test_store_name_prefers_company_over_fragment():
     assert _find_store_name(["よろずや", "2026/07/01", "合計 ¥500"]) == "よろずや"
 
 
+def test_receipt_fullwidth_mixed_tax_split():
+    """全角数字のレシート（ファミマの実物を再現）: 「１０％対象」「８％対象」
+    が全角で印字されていても8%/10%を分割できる。"""
+    lines = [
+        "FamilyMart",
+        "東古市場店",
+        "神奈川県川崎市幸区東古市場",
+        "登録番号:T8020002096077",
+        "２０２６年 ７月２３日（木）１６：４３",
+        "領 収 証",
+        "スーパードライ６缶３５", "￥１，３６８",
+        "オールフリー５００", "￥２４３軽",
+        "レジ袋２０号バイオマス", "￥５",
+        "スプバレ豊潤ラガー３５", "￥２６９",
+        "合 計", "￥１，８８５",
+        "（１０％対象", "￥１，６４２）",
+        "（内消費税等", "￥１４９）",
+        "（ ８％対象", "￥２４３）",
+        "（内消費税等", "￥１８）",
+        "ＱＵＩＣＰａｙ支払", "￥１，８８５",
+        "「軽」は軽減税率対象商品です。",
+    ]
+    result = parse_document(lines, "領収書")
+    assert len(result.entries) == 2, [w for w in result.warnings]
+
+    by_amount = {e.amount: e for e in result.entries}
+    assert by_amount[1642].debit_tax == "課対仕入込10%"
+    assert by_amount[243].debit_tax == "課対仕入込軽減8%"
+    assert sum(e.amount for e in result.entries) == 1885
+    # QUICPay（後払い型）→ 未払金、日付は全角でも読める
+    assert all(e.credit_account == "未払金" for e in result.entries)
+    assert all(e.date == date(2026, 7, 23) for e in result.entries)
+
+
 def test_image_compression():
     import io as _io
 
