@@ -90,7 +90,7 @@ def test_receipt_store_name_as_description():
         "合計 ¥1,290",
     ]
     result = parse_document(lines, "領収書", source_name="IMG_1234.jpg")
-    assert result.entries[0].description == "セブン-イレブン"  # ブランド名に統一
+    assert result.entries[0].description == "セブン-イレブン 江東亀戸店"  # ブランド＋支店名
 
     # 店名らしき行が見つからなければファイル名で代用
     result2 = parse_document(["2026/07/01", "合計 ¥500"], "領収書", source_name="IMG_5678.jpg")
@@ -373,7 +373,8 @@ def test_receipt_mixed_tax_split_by_item_markers():
     assert by_amount[1642].debit_tax == "課対仕入込10%"
     assert sum(e.amount for e in result.entries) == 1885
     assert all(e.credit_account == "未払金" for e in result.entries)  # QUICPay
-    assert all("ファミリーマート" in e.description for e in result.entries)  # ブランド名
+    # ブランド名＋支店名で摘要が入る
+    assert all(e.description.startswith("ファミリーマート 東古市場店") for e in result.entries)
 
 
 def test_receipt_markers_beat_missing_breakdown():

@@ -160,6 +160,22 @@ def _find_store_name(lines: list[str]) -> str | None:
     """
     brand = _find_brand(lines)
     if brand:
+        # 支店名（「東古市場店」のように「店」で終わる行）が読めていれば
+        # 「ファミリーマート 東古市場店」のようにブランド名に添える
+        for line in lines:
+            text = line.strip()
+            if (
+                text.endswith("店")
+                and 3 <= len(text) <= 20
+                and _store_name_candidate(text)
+            ):
+                if any(
+                    k in text.lower()
+                    for keywords, _n in _BRAND_CANONICAL
+                    for k in keywords
+                ):
+                    return text  # 支店名の行にブランド名も含まれている
+                return f"{brand} {text}"
         return brand
     for markers in (_COMPANY_MARKERS, _STORE_MARKERS):
         for line in lines:
