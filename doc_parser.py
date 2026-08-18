@@ -105,6 +105,28 @@ _STORE_NAME_SKIP = (
 _TADASHI_PATTERN = re.compile(r"但し?[、,]?\s*(.{2,25}?)\s*として")
 
 
+# 主要チェーンのブランド名。ロゴのOCR結果（FamilyMart等）や支店名
+# （川崎古川町店）ではなく、誰が見てもわかるブランド名を摘要に使う。
+# 学習ルール（セブン-イレブン→飲食代 等）のキーワードとも揃えやすくなる。
+_BRAND_CANONICAL = [
+    (("セブン-イレブン", "セブンイレブン", "セブン‐イレブン", "7-eleven", "seven-eleven"), "セブン-イレブン"),
+    (("familymart", "ファミリーマート", "ファミマ"), "ファミリーマート"),
+    (("lawson", "ローソン"), "ローソン"),
+    (("ministop", "ミニストップ"), "ミニストップ"),
+    (("デイリーヤマザキ",), "デイリーヤマザキ"),
+    (("newdays", "ニューデイズ"), "NewDays"),
+    (("セイコーマート",), "セイコーマート"),
+]
+
+
+def _find_brand(lines: list[str]) -> str | None:
+    text = " ".join(lines).lower()
+    for keywords, name in _BRAND_CANONICAL:
+        if any(k in text for k in keywords):
+            return name
+    return None
+
+
 # 会社名・店名の目印。縦書きレシートではOCRが「カー」「車番」のような
 # 断片を先頭に読み出すため、これらを含む行を優先して摘要に使う。
 _COMPANY_MARKERS = ("株式会社", "(株)", "（株）", "有限会社", "合同会社", "㈱", "㈲")
@@ -136,6 +158,9 @@ def _find_store_name(lines: list[str]) -> str | None:
     領収証の発行者欄（末尾）、最後に2回以上現れる行（ロゴと領収書欄の
     両方に印字される店名のパターン）の順に探す。
     """
+    brand = _find_brand(lines)
+    if brand:
+        return brand
     for markers in (_COMPANY_MARKERS, _STORE_MARKERS):
         for line in lines:
             text = line.strip()
@@ -370,26 +395,29 @@ def parse_document(
                 "2行に分割しました。"
             )
 
+        marked_sum = sum(_reduced_marked_amounts(lines))
+
         # 1) 内訳の行がきちんと読めて合計と一致する場合はそれに従う
         if amount8 and amount10 and amount8 + amount10 == total:
             _split(amount8, amount10)
             return result
-        # 2) 全額軽減の根拠がある場合（10%対象が0円、または10%の記載が
-        #    どこにもなく8%の内訳が合計と矛盾しない）
-        if amount10 == 0 or (
-            amount10 is None and no_ten_percent and (amount8 is None or amount8 == total)
-        ):
+        # 2) 10%対象が明示的に0円 → 全額軽減
+        if amount10 == 0:
             result.entries.append(
                 _entry(total, "課対仕入込軽減8%", description, note)
             )
             return result
-        # 3) 内訳が読めない（ラベルと金額がOCRで泣き別れ等）場合は、
-        #    品目の「軽」マーク（¥243軽）の合計を8%分とみなす
-        marked_sum = sum(_reduced_marked_amounts(lines))
+        # 3) 品目の「軽」マーク（¥243軽）が合計の一部にだけ付いている
+        #    → 混在の積極的な証拠なので、マーク合計を8%分として分割。
+        #    複数レシート写真の分割で内訳の行が別の断片に分かれても機能する
         if 0 < marked_sum < total:
             _split(marked_sum, total - marked_sum)
             return result
-        if marked_sum == total:
+        # 4) 全額軽減の根拠（マークが全品目に付いている、または10%の記載が
+        #    どこにもなく8%の内訳が合計と矛盾しない）
+        if marked_sum == total or (
+            amount10 is None and no_ten_percent and (amount8 is None or amount8 == total)
+        ):
             result.entries.append(
                 _entry(total, "課対仕入込軽減8%", description, note)
             )

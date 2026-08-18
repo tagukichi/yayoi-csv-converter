@@ -90,7 +90,7 @@ def test_receipt_store_name_as_description():
         "合計 ¥1,290",
     ]
     result = parse_document(lines, "領収書", source_name="IMG_1234.jpg")
-    assert result.entries[0].description == "セブン-イレブン 江東亀戸店"
+    assert result.entries[0].description == "セブン-イレブン"  # ブランド名に統一
 
     # 店名らしき行が見つからなければファイル名で代用
     result2 = parse_document(["2026/07/01", "合計 ¥500"], "領収書", source_name="IMG_5678.jpg")
@@ -373,6 +373,31 @@ def test_receipt_mixed_tax_split_by_item_markers():
     assert by_amount[1642].debit_tax == "課対仕入込10%"
     assert sum(e.amount for e in result.entries) == 1885
     assert all(e.credit_account == "未払金" for e in result.entries)  # QUICPay
+    assert all("ファミリーマート" in e.description for e in result.entries)  # ブランド名
+
+
+def test_receipt_markers_beat_missing_breakdown():
+    """複数レシート写真の分割で税率内訳の行が別の断片に分かれても、
+    品目の「軽」マークで混在を検出して分割する（ファミマ¥862の実機症状。
+    従来は「10%の記載なし→全額軽減」の推定が誤発動していた）。"""
+    lines = [
+        "FamilyMart", "東古市場店", "登録番号:T8020002096077",
+        "2026年 7月8日（水）20:14", "領 収 証",
+        "スーパードライ350 ¥237",
+        "オールフリー350 ¥177軽",
+        "◎スモークタン ¥280軽",
+        "◎ハムマカロニサラダ ¥168軽",
+        "合 計 ¥862",
+        "FamiPay支払 ¥862",
+        "「軽」は軽減税率対象商品です。",
+        # ※ (10%対象 ¥237) などの内訳行は別の断片に分かれて存在しない
+    ]
+    result = parse_document(lines, "領収書")
+    assert len(result.entries) == 2, [w for w in result.warnings]
+    by_amount = {e.amount: e for e in result.entries}
+    assert by_amount[625].debit_tax == "課対仕入込軽減8%"  # 177+280+168
+    assert by_amount[237].debit_tax == "課対仕入込10%"
+    assert all("ファミリーマート" in e.description for e in result.entries)
 
 
 def test_image_compression():
