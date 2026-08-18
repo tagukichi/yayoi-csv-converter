@@ -348,6 +348,33 @@ def test_receipt_fullwidth_mixed_tax_split():
     assert all(e.date == date(2026, 7, 23) for e in result.entries)
 
 
+def test_receipt_mixed_tax_split_by_item_markers():
+    """税率内訳の行と金額がOCRで泣き別れになるレイアウトでも、品目の
+    「軽」マーク（¥243軽）から8%/10%を分割できる（ファミマ実機の症状）。"""
+    lines = [
+        "FamilyMart", "東古市場店", "登録番号:T8020002096077",
+        "2026年 7月23日（木）16:43",
+        "領 収 証",
+        # 品目（金額の直後に「軽」マーク）
+        "スーパードライ6缶35 ¥1,368",
+        "オールフリー500 ¥243軽",
+        "レジ袋20号バイオマス ¥5",
+        "スプバレ豊潤ラガー35 ¥269",
+        # 内訳: ラベルの列と金額の列が別ブロックに読み出される
+        "合 計", "（10%対象", "（内消費税等", "（ 8%対象", "（内消費税等", "QUICPay支払",
+        "¥1,885", "¥1,642）", "¥149）", "¥243）", "¥18）", "¥1,885",
+        "「軽」は軽減税率対象商品です。",
+    ]
+    result = parse_document(lines, "領収書")
+    assert len(result.entries) == 2, [w for w in result.warnings]
+
+    by_amount = {e.amount: e for e in result.entries}
+    assert by_amount[243].debit_tax == "課対仕入込軽減8%"  # 軽マーク品目の合計
+    assert by_amount[1642].debit_tax == "課対仕入込10%"
+    assert sum(e.amount for e in result.entries) == 1885
+    assert all(e.credit_account == "未払金" for e in result.entries)  # QUICPay
+
+
 def test_image_compression():
     import io as _io
 

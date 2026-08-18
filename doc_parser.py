@@ -223,6 +223,27 @@ def _rate_target_amount(lines: list[str], rate: str) -> int | None:
     return None
 
 
+def _reduced_marked_amounts(lines: list[str]) -> list[int]:
+    """品目に付く軽減税率マークから8%対象の金額を集める。
+
+    コンビニ等のレシートは「オールフリー500 ¥243軽」のように金額の直後に
+    「軽」を印字する。税率内訳の行がOCRで金額と泣き別れになるレイアウト
+    でも、品目マークは金額と同じ行に付くため確実に拾える。
+    説明行（「軽」は軽減税率対象商品です）や内訳行（8%軽減対象）は除外する。
+    """
+    marked: list[int] = []
+    for line in lines:
+        if "軽" not in line or "軽減" in line or "対象" in line:
+            continue
+        for m in re.finditer(r"(\d{1,3}(?:[,，.．]\s?\d{3})+|\d+)\s*円?\s*軽", line):
+            token = _SEPARATORS.sub("", m.group(1))
+            if token.isdigit():
+                value = int(token)
+                if 1 <= value <= 100_000_000:
+                    marked.append(value)
+    return marked
+
+
 def _find_total(lines: list[str]) -> int | None:
     """合計金額を探す。
 
@@ -334,25 +355,43 @@ def parse_document(
     if reduced_hint and debit_tax == "課対仕入込10%":
         amount8 = _rate_target_amount(lines, "8")
         amount10 = _rate_target_amount(lines, "10")
-        # 書類のどこにも10%の記載がなければ全額軽減8%とみなす
-        # （OCRの行順の乱れで内訳金額を拾えなくても判定できるようにする）
         no_ten_percent = not re.search(r"10\s*[%％]", text)
-        if amount8 == total or amount10 == 0 or (no_ten_percent and amount10 is None):
+
+        def _split(a8: int, a10: int):
+            # 8%分と10%分を別仕訳に分割（会計事務所の指示）
+            result.entries.append(
+                _entry(a8, "課対仕入込軽減8%", f"{description}（軽減8%分）", "混在レシートの分割")
+            )
+            result.entries.append(
+                _entry(a10, "課対仕入込10%", f"{description}（10%分）", "混在レシートの分割")
+            )
+            result.warnings.append(
+                f"軽減税率の混在を検出し、8%分（{a8:,}円）と10%分（{a10:,}円）の"
+                "2行に分割しました。"
+            )
+
+        # 1) 内訳の行がきちんと読めて合計と一致する場合はそれに従う
+        if amount8 and amount10 and amount8 + amount10 == total:
+            _split(amount8, amount10)
+            return result
+        # 2) 全額軽減の根拠がある場合（10%対象が0円、または10%の記載が
+        #    どこにもなく8%の内訳が合計と矛盾しない）
+        if amount10 == 0 or (
+            amount10 is None and no_ten_percent and (amount8 is None or amount8 == total)
+        ):
             result.entries.append(
                 _entry(total, "課対仕入込軽減8%", description, note)
             )
             return result
-        if amount8 and amount10 and amount8 + amount10 == total:
-            # 8%分と10%分を別仕訳に分割（会計事務所の指示）
+        # 3) 内訳が読めない（ラベルと金額がOCRで泣き別れ等）場合は、
+        #    品目の「軽」マーク（¥243軽）の合計を8%分とみなす
+        marked_sum = sum(_reduced_marked_amounts(lines))
+        if 0 < marked_sum < total:
+            _split(marked_sum, total - marked_sum)
+            return result
+        if marked_sum == total:
             result.entries.append(
-                _entry(amount8, "課対仕入込軽減8%", f"{description}（軽減8%分）", "混在レシートの分割")
-            )
-            result.entries.append(
-                _entry(amount10, "課対仕入込10%", f"{description}（10%分）", "混在レシートの分割")
-            )
-            result.warnings.append(
-                f"軽減税率の混在を検出し、8%分（{amount8:,}円）と10%分（{amount10:,}円）の"
-                "2行に分割しました。"
+                _entry(total, "課対仕入込軽減8%", description, note)
             )
             return result
         result.warnings.append(
