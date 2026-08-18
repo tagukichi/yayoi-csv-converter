@@ -18,6 +18,7 @@ from ocr import (
     split_text_clusters,
 )
 from doc_parser import (
+    apply_description_rules,
     detect_document_type,
     parse_document,
     parse_payroll,
@@ -345,6 +346,34 @@ def _bump_ledger() -> None:
     st.session_state["ledger_rev"] += 1
 
 
+def _learn_from_row_edit(target_client: str, original_desc, changes: dict) -> int:
+    """仕訳表の直接編集から摘要・科目のルールを学習する。学習件数を返す。
+
+    - 摘要が書き換えられた → 「元の摘要 → 新しい摘要」を摘要ルールに
+      （例: セブン-イレブン川崎店 → 飲食代。次回同じ店の摘要は自動で置き換わる）
+    - 勘定科目が書き換えられた → 「元の摘要 → 新しい科目」を科目ルールに
+    """
+    keyword = str(original_desc or "").strip()
+    if len(keyword) < 2:
+        return 0
+    learned = 0
+    if "摘要" in changes:
+        new_desc = str(changes["摘要"]).strip()
+        if new_desc and new_desc != keyword and storage.add_desc_rule(target_client, keyword, new_desc):
+            learned += 1
+    if "借方勘定科目" in changes:
+        account = str(changes["借方勘定科目"]).strip()
+        if account and yayoi_tax(account) != "対象外":
+            if storage.add_account_rule(keyword, account, side="expense"):
+                learned += 1
+    if "貸方勘定科目" in changes:
+        account = str(changes["貸方勘定科目"]).strip()
+        if account and yayoi_tax(account) != "対象外":
+            if storage.add_account_rule(keyword, account, side="income"):
+                learned += 1
+    return learned
+
+
 def _persist_pending_edits(target_client: str) -> bool:
     """仕訳表の未保存の編集（「変更を保存」前のもの）をDBに書き込む。
 
@@ -364,6 +393,7 @@ def _persist_pending_edits(target_client: str) -> bool:
     for row_idx, changes in edited.items():
         row_idx = int(row_idx)
         if row_idx < len(df):
+            _learn_from_row_edit(target_client, df.iloc[row_idx]["摘要"], changes)
             for col, value in changes.items():
                 if col in df.columns:
                     df.iloc[row_idx, df.columns.get_loc(col)] = value
@@ -521,6 +551,12 @@ if st.button("変換を開始", type="primary"):
                                 custom_expense_rules=learned_expense,
                             )
                             preview = "\n".join(texts)
+                        # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用
+                        _desc_rules = storage.list_desc_rules(client)
+                        if _desc_rules:
+                            _replaced = apply_description_rules(result.entries, _desc_rules)
+                            if _replaced:
+                                st.caption(f"📝 学習済みの摘要ルールを {_replaced} 件に適用しました。")
                         for w in result.warnings:
                             st.warning(w)
                         added = storage.add_entries(client, result.entries, source_file=f.name)
@@ -578,8 +614,20 @@ else:
         with col_save:
             if st.button("💾 変更を保存"):
                 try:
+                    # 直接編集の差分から摘要・科目のルールを学習する
+                    learned_total = 0
+                    for idx in df.index.intersection(edited_df.index):
+                        changes = {}
+                        for col in ("摘要", "借方勘定科目", "貸方勘定科目"):
+                            if str(df.loc[idx, col]) != str(edited_df.loc[idx, col]):
+                                changes[col] = edited_df.loc[idx, col]
+                        if changes:
+                            learned_total += _learn_from_row_edit(client, df.loc[idx, "摘要"], changes)
                     saved = storage.replace_entries(client, edited_df)
-                    st.success(f"{saved} 件を保存しました。")
+                    message = f"{saved} 件を保存しました。"
+                    if learned_total:
+                        message += f" 編集内容から {learned_total} 件のルールを学習しました（次回から自動適用）。"
+                    st.success(message)
                     _bump_ledger()
                     st.rerun()
                 except Exception as e:
@@ -609,6 +657,10 @@ else:
                                        help="経費の科目は借方、通帳の入金の科目は貸方です")
             bulk_account = col_acct.text_input("変更後の勘定科目", key="bulk_account",
                                                placeholder="例: 旅費交通費")
+            bulk_new_desc = st.text_input(
+                "摘要も書き換える（空欄なら変更しない）", key="bulk_new_desc",
+                placeholder="例: 飲食代 ／ セブンイレブン 飲食代（会社の流儀に合わせて自由に）",
+            )
             bulk_clear_review = st.checkbox("変更した行の「要確認」を解除する", value=True, key="bulk_clear_review")
             bulk_learn = st.checkbox("このルールを学習し、次回の変換から自動で適用する", value=True, key="bulk_learn")
 
@@ -627,15 +679,22 @@ else:
                     else:
                         updated.loc[mask, target_col] = account
                         updated.loc[mask, tax_col] = yayoi_tax(account)
+                        new_desc = bulk_new_desc.strip()
+                        if new_desc:
+                            updated.loc[mask, "摘要"] = new_desc
                         if bulk_clear_review:
                             updated.loc[mask, "要確認"] = False
                         storage.replace_entries(client, updated)
                         message = f"{count} 件の{target_col}を「{account}」に変更しました。"
+                        if new_desc:
+                            message += f" 摘要も「{new_desc}」に書き換えました。"
                         if bulk_learn:
                             storage.add_account_rule(
                                 keyword, account,
                                 side="expense" if bulk_side == "借方" else "income",
                             )
+                            if new_desc:
+                                storage.add_desc_rule(client, keyword, new_desc)
                             message += " ルールを学習しました（次回の変換から自動適用）。"
                         st.session_state["flash"] = message
                         _bump_ledger()
@@ -644,7 +703,7 @@ else:
             learned_rules = storage.list_account_rules()
             if learned_rules:
                 st.divider()
-                st.caption(f"🧠 学習済みルール（{len(learned_rules)}件）— 変換時に自動で科目が付きます:")
+                st.caption(f"🧠 学習済みの科目ルール（{len(learned_rules)}件）— 変換時に自動で科目が付きます:")
                 for rule in learned_rules:
                     col_r1, col_r2, col_r3 = st.columns([3, 2, 1])
                     col_r1.write(f"摘要に「{rule['keyword']}」")
@@ -652,6 +711,17 @@ else:
                     col_r2.write(f"→ {side_label}: {rule['account']}")
                     if col_r3.button("削除", key=f"rule_del_{rule['id']}"):
                         storage.delete_account_rule(rule["id"])
+                        st.rerun()
+            learned_descs = storage.list_desc_rules(client)
+            if learned_descs:
+                st.divider()
+                st.caption(f"🧠 学習済みの摘要ルール（{client}・{len(learned_descs)}件）— 変換時に摘要を書き換えます:")
+                for rule in learned_descs:
+                    col_d1, col_d2, col_d3 = st.columns([3, 2, 1])
+                    col_d1.write(f"摘要に「{rule['keyword']}」")
+                    col_d2.write(f"→ 「{rule['description']}」")
+                    if col_d3.button("削除", key=f"desc_del_{rule['id']}"):
+                        storage.delete_desc_rule(rule["id"])
                         st.rerun()
 
         # --- ファイル単位の取り消し ---

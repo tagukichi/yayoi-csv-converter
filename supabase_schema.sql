@@ -45,6 +45,17 @@ create table if not exists subaccounts (
   unique (client, account, sub_name)
 );
 
+-- 摘要の書き換えルール（クライアント別）。「セブンイレブン→飲食代」のような
+-- 会社ごとの摘要の流儀を学習する
+create table if not exists desc_rules (
+  id bigint generated always as identity primary key,
+  client text not null,
+  keyword text not null,
+  description text not null,
+  created_at timestamptz not null default now(),
+  unique (client, keyword)
+);
+
 -- 一括置換から学習した「摘要キーワード → 勘定科目」ルール
 -- side: expense=借方（費用）, income=貸方（収益）
 create table if not exists account_rules (

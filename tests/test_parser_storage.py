@@ -525,6 +525,44 @@ def test_multi_receipt_clustering():
     assert len(split_text_clusters(receipt_a)) == 1
 
 
+def test_desc_rules_storage_and_apply():
+    """摘要ルール: クライアント別に学習し、変換時に摘要を書き換える。"""
+    from doc_parser import apply_description_rules
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        # 学習（同じキーワードは上書き。短すぎる/空は拒否）
+        assert storage.add_desc_rule("A建設", "セブン-イレブン", "飲食代", db_path=db) is True
+        assert storage.add_desc_rule("A建設", "セブン-イレブン川崎古川町店", "セブンイレブン 飲食代", db_path=db) is True
+        assert storage.add_desc_rule("A建設", "х", "x", db_path=db) is False
+        assert storage.add_desc_rule("A建設", "同じ", "同じ", db_path=db) is False
+        # クライアント別（B工務店には無い）
+        assert storage.list_desc_rules("B工務店", db_path=db) == []
+
+        rules = storage.list_desc_rules("A建設", db_path=db)
+        assert len(rules) == 2
+        # 長いキーワードが先に評価される
+        assert rules[0]["keyword"] == "セブン-イレブン川崎古川町店"
+
+        entries = [
+            JournalEntry(date=date(2026, 7, 6), debit_account="会議費",
+                         credit_account="未払金", amount=321,
+                         description="セブン-イレブン川崎古川町店"),
+            JournalEntry(date=date(2026, 7, 7), debit_account="会議費",
+                         credit_account="未払金", amount=500,
+                         description="セブン-イレブン新宿店"),
+            JournalEntry(date=date(2026, 7, 8), debit_account="雑費",
+                         credit_account="現金", amount=100,
+                         description="関係ない店"),
+        ]
+        replaced = apply_description_rules(entries, rules)
+        assert replaced == 2
+        # 完全一致に近い長いルールが優先され、別店舗は一般ルールが効く
+        assert entries[0].description == "セブンイレブン 飲食代"
+        assert entries[1].description == "飲食代"
+        assert entries[2].description == "関係ない店"
+
+
 def test_detect_document_type():
     from doc_parser import detect_document_type
 

@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS subaccounts (
 )
 """
 
+# 摘要の書き換えルール（クライアント別）。摘要にキーワードを含む仕訳の
+# 摘要を description に置き換える。「セブンイレブン→飲食代」のような
+# 会社ごとの摘要の流儀を学習する
+_CREATE_DESC_RULES_SQL = """
+CREATE TABLE IF NOT EXISTS desc_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, keyword)
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -176,6 +190,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_SQL)
     conn.execute(_CREATE_CLIENTS_SQL)
     conn.execute(_CREATE_RULES_SQL)
+    conn.execute(_CREATE_DESC_RULES_SQL)
     conn.execute(_CREATE_SUBACCOUNTS_SQL)
     # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
@@ -436,6 +451,54 @@ def replace_subaccounts(client: str, records: list[dict], db_path: Path = DB_PAT
             [(c["client"], c["account"], c["sub_name"], c["search_key"]) for c in cleaned],
         )
     return len(cleaned)
+
+
+def list_desc_rules(client: str, db_path: Path = DB_PATH) -> list[dict]:
+    """クライアントの摘要書き換えルール一覧を返す（キーワードの長い順）。"""
+    if _supabase_enabled(db_path):
+        rows = (
+            _sb().table("desc_rules").select("*").eq("client", client)
+            .order("id", desc=True).execute().data
+        )
+    else:
+        with _connect(db_path) as conn:
+            fetched = conn.execute(
+                "SELECT id, keyword, description FROM desc_rules WHERE client = ? ORDER BY id DESC",
+                (client,),
+            ).fetchall()
+        rows = [{"id": r[0], "keyword": r[1], "description": r[2]} for r in fetched]
+    # 「セブン-イレブン川崎店」より「セブン-イレブン」のような短い一般則が
+    # 先に食わないよう、長いキーワードを優先する
+    return sorted(rows, key=lambda r: len(r["keyword"]), reverse=True)
+
+
+def add_desc_rule(client: str, keyword: str, description: str, db_path: Path = DB_PATH) -> bool:
+    """摘要書き換えルールを学習する。同じキーワードは上書き。"""
+    keyword, description = keyword.strip(), description.strip()
+    if len(keyword) < 2 or not description or keyword == description:
+        return False
+    if _supabase_enabled(db_path):
+        _sb().table("desc_rules").upsert(
+            {"client": client, "keyword": keyword, "description": description},
+            on_conflict="client,keyword",
+        ).execute()
+        return True
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO desc_rules (client, keyword, description) VALUES (?, ?, ?)
+               ON CONFLICT (client, keyword) DO UPDATE SET description = excluded.description""",
+            (client, keyword, description),
+        )
+    return True
+
+
+def delete_desc_rule(rule_id: int, db_path: Path = DB_PATH) -> None:
+    """摘要書き換えルールを削除する。"""
+    if _supabase_enabled(db_path):
+        _sb().table("desc_rules").delete().eq("id", rule_id).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM desc_rules WHERE id = ?", (rule_id,))
 
 
 def list_account_rules(db_path: Path = DB_PATH) -> list[dict]:

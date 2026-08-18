@@ -363,6 +363,26 @@ def parse_document(
     return result
 
 
+def apply_description_rules(entries: list[JournalEntry], rules: list[dict]) -> int:
+    """学習済みの摘要書き換えルールを仕訳に適用する。書き換えた件数を返す。
+
+    rules は storage.list_desc_rules() の結果（キーワードの長い順）。
+    摘要にキーワードを含む仕訳の摘要を、ルールの文言に置き換える。
+    「飲食代」「セブンイレブン 飲食代」など、置き換え後の文言は
+    会社ごとの流儀のまま登録されている前提。
+    """
+    replaced = 0
+    for entry in entries:
+        for rule in rules:
+            keyword = rule.get("keyword", "")
+            if keyword and keyword in entry.description:
+                if entry.description != rule["description"]:
+                    entry.description = rule["description"]
+                    replaced += 1
+                break
+    return replaced
+
+
 def parse_receipt_clusters(
     clusters: list[list[str]],
     source_name: str = "",
