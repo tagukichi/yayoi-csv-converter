@@ -483,6 +483,7 @@ if st.button("変換を開始", type="primary"):
                                 [[ln.text for ln in cluster] for cluster in receipt_clusters],
                                 source_name=f.name,
                                 custom_expense_rules=learned_expense,
+                                client_name=client,
                             )
                             st.info(
                                 f"1枚の画像から {len(result.entries)} 件のレシートを検出し、"
@@ -549,6 +550,7 @@ if st.button("変換を開始", type="primary"):
                             result = parse_document(
                                 texts, effective_type, source_name=f.name,
                                 custom_expense_rules=learned_expense,
+                                client_name=client,
                             )
                             preview = "\n".join(texts)
                         # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用

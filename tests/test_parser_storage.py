@@ -343,8 +343,8 @@ def test_receipt_fullwidth_mixed_tax_split():
     assert by_amount[1642].debit_tax == "課対仕入込10%"
     assert by_amount[243].debit_tax == "課対仕入込軽減8%"
     assert sum(e.amount for e in result.entries) == 1885
-    # QUICPay（後払い型）→ 未払金、日付は全角でも読める
-    assert all(e.credit_account == "未払金" for e in result.entries)
+    # 電子マネー（QUICPay）は会計事務所の指示により現金扱い。日付は全角でも読める
+    assert all(e.credit_account == "現金" for e in result.entries)
     assert all(e.date == date(2026, 7, 23) for e in result.entries)
 
 
@@ -372,7 +372,8 @@ def test_receipt_mixed_tax_split_by_item_markers():
     assert by_amount[243].debit_tax == "課対仕入込軽減8%"  # 軽マーク品目の合計
     assert by_amount[1642].debit_tax == "課対仕入込10%"
     assert sum(e.amount for e in result.entries) == 1885
-    assert all(e.credit_account == "未払金" for e in result.entries)  # QUICPay
+    # 電子マネー（QUICPay）は会計事務所の指示により現金扱い
+    assert all(e.credit_account == "現金" for e in result.entries)
     # ブランド名＋支店名で摘要が入る
     assert all(e.description.startswith("ファミリーマート 東古市場店") for e in result.entries)
 
@@ -399,6 +400,50 @@ def test_receipt_markers_beat_missing_breakdown():
     assert by_amount[625].debit_tax == "課対仕入込軽減8%"  # 177+280+168
     assert by_amount[237].debit_tax == "課対仕入込10%"
     assert all("ファミリーマート" in e.description for e in result.entries)
+
+
+def test_receipt_resident_tax_slip():
+    """住民税（特別徴収）の領収証書: 預り金（補助:住民税）/現金 で仕訳する。"""
+    lines = [
+        "神奈川県 川崎市 個人市民税 個人県民税 森林環境税 領収証書",
+        "市区町村コード 141305", "口座番号 00200-0-960014",
+        "加入者名 川崎市会計管理者",
+        "令和 8年 6月分", "指定番号 0000142650", "納入金額(1) 12,500 円",
+        "納期限 令和 8年 7月10日",
+        "(特別徴収義務者) 住所又は所在地 川崎市幸区古市場1828番地2",
+        "氏名又は名称 株式会社 Kライフ 様",
+        "上記のとおり領収しました。",
+    ]
+    result = parse_document(lines, "領収書", client_name="株式会社Kライフ")
+    e = result.entries[0]
+    assert e.amount == 12500
+    assert (e.debit_account, e.debit_sub) == ("預り金", "住民税")
+    assert e.credit_account == "現金"
+    assert e.debit_tax == "対象外"
+    assert "川崎市" in e.description and "住民税" in e.description
+
+
+def test_receipt_rotary_club_addressee_excluded():
+    """ロータリークラブの領収証: 宛名（クライアント企業名）を摘要にせず、
+    発行者（〜クラブ）と但し書きを摘要にする。"""
+    lines = [
+        "領 収 証", "2026年 7月10日",
+        "(株)Kライフ", "中塚 佳 様",
+        "下記、正に領収いたしました。",
+        "金額 ¥ 8,000 -",
+        "Rotary", "国際ロータリー第2590地区第1グループ",
+        "川崎幸ロータリークラブ",
+        "但し 7/24 創立記念夜間移動例会 会費",
+        "扱人 李 欣娟",
+    ]
+    result = parse_document(lines, "領収書", client_name="株式会社Kライフ")
+    e = result.entries[0]
+    assert e.amount == 8000
+    assert e.date == date(2026, 7, 10)
+    assert "ロータリークラブ" in e.description  # 宛名(Kライフ)ではなく発行者
+    assert "Kライフ" not in e.description
+    assert "会費" in e.description  # 「として」なしの但し書きも拾う
+    assert e.debit_account == "諸会費"  # 会費 → 諸会費
 
 
 def test_image_compression():

@@ -88,7 +88,7 @@ _AMOUNT_PATTERN = re.compile(r"[¥￥]?\s*(\d{1,3}(?:[,，.．]\s?\d{3})+|\d+)(?
 
 _SEPARATORS = re.compile(r"[,，.．\s]")
 
-_TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額", "お買上げ計", "お買い上げ計")
+_TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額", "お買上げ計", "お買い上げ計", "納入金額")
 
 # レシートで合計と誤認しやすい行（預り金・釣り銭・ポイント）は金額候補から除外する
 _EXCLUDE_KEYWORDS = ("預り", "預かり", "お釣", "おつり", "釣り銭", "釣銭", "ポイント", "残高")
@@ -130,7 +130,7 @@ def _find_brand(lines: list[str]) -> str | None:
 # 会社名・店名の目印。縦書きレシートではOCRが「カー」「車番」のような
 # 断片を先頭に読み出すため、これらを含む行を優先して摘要に使う。
 _COMPANY_MARKERS = ("株式会社", "(株)", "（株）", "有限会社", "合同会社", "㈱", "㈲")
-_STORE_MARKERS = ("店", "パーク", "パーキング", "駅", "館", "商店", "屋", "自動車", "ホテル")
+_STORE_MARKERS = ("店", "パーク", "パーキング", "駅", "館", "商店", "屋", "自動車", "ホテル", "クラブ", "組合", "協会", "センター", "事務所")
 
 
 def _store_name_candidate(text: str) -> bool:
@@ -149,7 +149,17 @@ def _store_name_candidate(text: str) -> bool:
     return True
 
 
-def _find_store_name(lines: list[str]) -> str | None:
+_COMPANY_LEGAL_TOKENS = ("株式会社", "有限会社", "合同会社", "㈱", "㈲", "(株)", "(有)", "（株）", "（有）")
+
+
+def _normalize_company(text: str) -> str:
+    s = unicodedata.normalize("NFKC", text)
+    for token in _COMPANY_LEGAL_TOKENS:
+        s = s.replace(token, "")
+    return re.sub(r"\s", "", s).lower()
+
+
+def _find_store_name(lines: list[str], exclude_name: str | None = None) -> str | None:
     """OCR結果から店舗名らしき行を探す。
 
     まず書類全体から会社名・店名の目印を含む行を探す（縦書きレシートでは
@@ -158,6 +168,12 @@ def _find_store_name(lines: list[str]) -> str | None:
     領収証の発行者欄（末尾）、最後に2回以上現れる行（ロゴと領収書欄の
     両方に印字される店名のパターン）の順に探す。
     """
+    exclude = _normalize_company(exclude_name) if exclude_name else None
+
+    def _is_addressee(text: str) -> bool:
+        # 宛名（クライアント企業名）は発行者ではないので摘要にしない
+        return bool(exclude) and exclude in _normalize_company(text)
+
     brand = _find_brand(lines)
     if brand:
         # 支店名（「東古市場店」のように「店」で終わる行）が読めていれば
@@ -180,18 +196,21 @@ def _find_store_name(lines: list[str]) -> str | None:
     for markers in (_COMPANY_MARKERS, _STORE_MARKERS):
         for line in lines:
             text = line.strip()
-            if len(text) >= 4 and any(m in text for m in markers) and _store_name_candidate(text):
+            if (
+                len(text) >= 4 and any(m in text for m in markers)
+                and _store_name_candidate(text) and not _is_addressee(text)
+            ):
                 return text
     for line in lines[:8]:
-        if _store_name_candidate(line):
+        if _store_name_candidate(line) and not _is_addressee(line):
             return line.strip()
     for line in reversed(lines[-12:]):
-        if _store_name_candidate(line):
+        if _store_name_candidate(line) and not _is_addressee(line):
             return line.strip()
     seen: dict[str, int] = {}
     for line in lines:
         text = line.strip()
-        if _store_name_candidate(text):
+        if _store_name_candidate(text) and not _is_addressee(text):
             seen[text] = seen.get(text, 0) + 1
     for text, count in seen.items():
         if count >= 2:
@@ -199,10 +218,10 @@ def _find_store_name(lines: list[str]) -> str | None:
     return None
 
 
-# 支払手段がクレジットカード（後払い型電子マネー含む）なら、
-# 貸方は現金ではなく未払金にする
+# 「クレジット」と明記された支払いのみ貸方を未払金にする。
+# QUICPay・FamiPay等の電子マネーは会計事務所の指示により現金扱い
 _CREDIT_PAYMENT_KEYWORDS = (
-    "クレジット", "credit", "visa", "mastercard", "jcb", "amex", "quicpay",
+    "クレジット", "credit", "visa", "mastercard", "jcb", "amex",
 )
 
 
@@ -326,6 +345,7 @@ def parse_document(
     document_type: str,
     source_name: str = "",
     custom_expense_rules: list[tuple[str, str]] | None = None,
+    client_name: str | None = None,
 ) -> ParseResult:
     """OCRテキスト行を書類タイプに応じて仕訳データに変換する。"""
     result = ParseResult()
@@ -357,6 +377,7 @@ def parse_document(
 
     text = " ".join(lines)
     debit_account, _ = estimate_expense_account(text, custom_expense_rules)
+    debit_sub = ""
     credit_account = CREDIT_ACCOUNT_BY_DOC_TYPE[document_type]
 
     # 支払手段がクレジットカードなら、貸方を現金ではなく未払金にする
@@ -366,11 +387,32 @@ def parse_document(
         credit_account = "未払金"
 
     # 摘要はOCRから拾った店舗名を優先し、取れなければファイル名で代用。
-    # 但し書き（「御菓子代として」等）が読めれば添える
-    description = _find_store_name(lines) or source_name or document_type
+    # 但し書き（「御菓子代として」「但し 〜 会費」等）が読めれば添える
+    description = _find_store_name(lines, exclude_name=client_name) or source_name or document_type
     tadashi = _TADASHI_PATTERN.search(text)
     if tadashi:
         description = f"{description} {tadashi.group(1)}"
+    else:
+        for line in lines:
+            stripped = line.strip()
+            m = re.match(r"^但し?[、,]?\s*(.{2,40})$", stripped)
+            if m and "として" not in m.group(1):
+                description = f"{description} {m.group(1).strip()}"
+                break
+
+    # 住民税（特別徴収）の納付書: 給与から預かった住民税の納付なので、
+    # 会計事務所のルールどおり 預り金（補助: 住民税）/ 現金 にする
+    if ("特別徴収" in text and "領収証書" in text) or ("個人市民税" in text and "個人県民税" in text):
+        debit_account, debit_sub = "預り金", "住民税"
+        municipality = next(
+            (
+                m.group(1)
+                for line in lines
+                if (m := re.search(r"([一-龥]{1,6}[市区町村])会計管理者", line))
+            ),
+            None,
+        )
+        description = f"住民税納付 {municipality}" if municipality else "住民税納付"
 
     # 軽減税率8%の判定。全額が8%対象なら税区分を軽減8%に、
     # 10%との混在は会計事務所の指示により8%分と10%分の2行に分割する
@@ -384,6 +426,7 @@ def parse_document(
         return JournalEntry(
             date=found_date,
             debit_account=debit_account,
+            debit_sub=debit_sub,
             credit_account=credit_account,
             amount=amount,
             description=desc,
@@ -470,6 +513,7 @@ def parse_receipt_clusters(
     clusters: list[list[str]],
     source_name: str = "",
     custom_expense_rules: list[tuple[str, str]] | None = None,
+    client_name: str | None = None,
 ) -> ParseResult:
     """1枚の写真から分割した複数レシートを解析してまとめる。
 
@@ -485,6 +529,7 @@ def parse_receipt_clusters(
         partial = parse_document(
             texts, "領収書", source_name=source_name,
             custom_expense_rules=custom_expense_rules,
+            client_name=client_name,
         )
         date_guessed = any("日付" in w for w in partial.warnings)
         for e in partial.entries:
