@@ -130,7 +130,7 @@ with st.expander("📖 使い方", expanded=True):
         1. **書類タイプを選択** します（領収書／レシート・通帳・カード明細・給与台帳・
            売上（売掛表）・売上請求書・仕入請求書・買掛表 など）
         2. **ファイルをアップロード** します（PDF・PNG・JPG・XLSX・CSV。複数まとめて選択できます）
-           - 売上（売掛表）・買掛表・請求書は **ExcelやCSVのままアップロードできます**（OCR不要でそのまま解析）
+           - 買掛表は **ExcelやCSVのままアップロード** します（OCR不要でそのまま解析）。他の書類は写真・PDFでOKです
         3. **「変換を開始」** をクリックします（読み取りに数十秒かかることがあります）
         4. **「✏️ 仕訳の編集」** タブで内容を確認します
            - **「要確認」にチェックが付いた行**は、勘定科目を自動で判断できなかった行です。
@@ -489,24 +489,49 @@ document_type = st.selectbox(
         "売上", "売上請求書", "仕入請求書", "買掛表",
     ],
     help=(
-        "売上＝取引先別の月次売上一覧（売掛表）。売上・買掛表・請求書は "
-        "Excel（xlsx）やCSVのままアップロードできます。"
+        "売上＝取引先別の月次売上一覧（売掛表）。買掛表のみ Excel（xlsx/CSV）で"
+        "アップロードします。他は写真・PDFで読み取ります。"
     ),
 )
 
 if document_type in PARTNER_LEDGER_TYPES:
+    _how = (
+        "Excel（xlsx・CSV）のままアップロードしてください（OCR不要でそのまま解析）。"
+        if document_type == "買掛表"
+        else "写真・PDFでアップロードしてください。"
+    )
     st.caption(
-        "💡 取引先名（または行番号）と当月金額が並んだ表を読み取り、"
-        "月末日付・取引先ごとに1本の仕訳（税込10%）を作ります。"
+        f"💡 取引先名（または行番号）と当月金額が並んだ表を読み取り、"
+        f"月末日付・取引先ごとに1本の仕訳（税込10%）を作ります。{_how}"
         "行番号だけの表は、上の「🗂 事前登録 → 🔢 売掛・買掛の行番号」で"
         "取引先名を登録しておくと自動で名前が付きます。"
     )
 elif document_type in INVOICE_TYPES:
     st.caption(
-        "💡 請求書の「当月合計額＋消費税」を1本の仕訳にします。"
+        "💡 請求書の写真・PDFから「当月合計額＋消費税」を1本の仕訳にします。"
         "取引先（宛名・発行者）は補助科目に入り、初めての取引先は"
         "自動で補助科目マスタに登録されます。"
     )
+
+# 買掛表はExcelでもらう運用のため、アップロードもExcel（xlsx/CSV）に限定する。
+# 他の書類タイプは従来どおり写真・PDF中心（xlsx/CSVも受け付ける）
+if document_type == "買掛表":
+    _upload_types = ["xlsx", "csv"]
+    _upload_help = "買掛表は Excel（XLSX）または CSV でアップロードしてください。"
+    # ドロップゾーンの案内文（CSSで日本語化している）も差し替える
+    st.markdown(
+        """
+        <style>
+        [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+            content: "1ファイル200MBまで ・ XLSX / CSV に対応（買掛表はExcelのまま）";
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    _upload_types = ["pdf", "png", "jpg", "jpeg", "xlsx", "csv"]
+    _upload_help = "PDF・PNG・JPG・XLSX・CSV に対応しています。スマートフォンで撮影した領収書の写真も使えます。"
 
 # 通帳のときは、補助科目マスタ（普通預金）に登録された銀行から口座を選べる
 bank_sub = None
@@ -528,9 +553,9 @@ if document_type == "通帳":
 
 uploaded_files = st.file_uploader(
     "ファイルをアップロード（複数選択できます）",
-    type=["pdf", "png", "jpg", "jpeg", "xlsx", "csv"],
+    type=_upload_types,
     accept_multiple_files=True,
-    help="PDF・PNG・JPG・XLSX・CSV に対応しています。スマートフォンで撮影した領収書の写真も使えます。",
+    help=_upload_help,
 )
 
 # 同じファイルを2回アップロードして仕訳が重複する事故を防ぐ。
