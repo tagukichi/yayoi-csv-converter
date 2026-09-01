@@ -1,0 +1,25 @@
+# 画面テーマ（デザイン案「サイドバー型ダッシュボード」の配色）
+# 色や書体を変えるときはここと ui_theme.py を編集する
+[theme]
+base = "light"
+primaryColor = "#34459b"
+backgroundColor = "#f6f6f3"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#20242e"
+font = "IBM Plex Sans JP, sans-serif"
+baseRadius = "8px"
+
+[theme.sidebar]
+backgroundColor = "#202741"
+secondaryBackgroundColor = "#2b3454"
+textColor = "#e8eaf2"
+primaryColor = "#4d5ec4"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
