@@ -1,8 +1,10 @@
-"""補助科目マスタ: 弥生「補助科目一覧表」PDFの読み取りと、OCR摘要との突合。
+"""科目・補助科目マスタ: 弥生の一覧表PDFの読み取りと、OCR摘要との突合。
 
 - parse_yayoi_subaccount_pdf(): 弥生から出力した補助科目一覧表PDFを解析し、
   (勘定科目, 補助科目, サーチキー) の一覧を返す。クライアント別マスタの
   一括登録に使う。
+- parse_yayoi_account_pdf(): 弥生「勘定科目一覧表」PDFから勘定科目マスタ
+  （科目名・サーチキー・貸借区分・税区分）を抽出する。
 - match_subaccount(): 通帳のOCR摘要（半角カタカナが多い）をマスタと突合する。
   補助科目名の正規化一致に加え、カタカナをローマ字化して弥生のサーチキー
   英字（利用者が付けた略称ローマ字）と照合する。
@@ -73,6 +75,95 @@ def parse_yayoi_subaccount_pdf(file_bytes: bytes) -> list[dict]:
                             "search_key": search_key,
                         }
                     )
+    return records
+
+
+# --- 弥生 勘定科目一覧表PDF の解析 ---
+
+# 勘定科目一覧表に現れる税区分の値（補助科目一覧表より種類が多い）
+_ACCOUNT_TAX_WORDS = _TAX_WORDS + ("課対仕返", "課税売返", "課税売倒", "有価譲渡")
+
+
+def _parse_account_rows(rows: list[list[str]]) -> list[dict]:
+    """勘定科目一覧表の行（セル文字列のリスト）から科目レコードを抽出する。
+
+    弥生のPDFは科目名の文字間にスペースが入る（「現 金」）ため、セルを
+    連結して名前にする。データ行の判定は
+      「借方/貸方」セルがあり、かつ税区分セルか数字サーチキーを持つ
+    で行う。これで「現金・預金合計」などの集計行やセクション見出し
+    （[流動資産] 等）、表ヘッダ・フッターが自然に外れる。
+    末尾に「○」が付く行は弥生上の非表示科目なので除外する。
+    """
+    records: list[dict] = []
+    for cells in rows:
+        cells = [c for c in cells if c.strip()]
+        if not cells:
+            continue
+        side_idx = next((i for i, c in enumerate(cells) if c in ("借方", "貸方")), None)
+        if side_idx is None:
+            continue
+        if cells[-1] == "○":  # 非表示科目（弥生の画面に出ない）は取り込まない
+            continue
+        before = cells[:side_idx]
+        search_key = ""
+        if before and re.fullmatch(r"\d+", before[-1]):
+            search_key = before[-1]
+            before = before[:-1]
+        tax_class = next(
+            (
+                c
+                for c in cells[side_idx + 1 :]
+                if any(c.startswith(w) for w in _ACCOUNT_TAX_WORDS)
+            ),
+            "",
+        )
+        # 集計行（「〜合計」「売上原価」等）は税区分もサーチキーも持たない
+        if not tax_class and not search_key:
+            continue
+        name = "".join(before).strip()
+        if not name:
+            continue
+        records.append(
+            {
+                "name": name,
+                "search_key": search_key,
+                "side": cells[side_idx],
+                "tax_class": tax_class,
+            }
+        )
+    return records
+
+
+def parse_yayoi_account_pdf(file_bytes: bytes) -> list[dict]:
+    """弥生「勘定科目一覧表」PDFから勘定科目マスタを抽出する。
+
+    戻り値: {"name", "search_key", "side"(借方/貸方), "tax_class"} のリスト。
+    """
+    import pdfplumber
+
+    records: list[dict] = []
+    seen: set[str] = set()
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            # top座標のクラスタリングで行をまとめる。固定幅の丸め
+            # (round(top/4)) だと丸め境界をまたいだ行が2つに割れ、
+            # 科目名と税区分が別の行に泣き別れることがある
+            words = sorted(page.extract_words(), key=lambda w: w["top"])
+            rows: list[list[str]] = []
+            groups: list[list] = []
+            for w in words:
+                if groups and w["top"] - groups[-1][-1]["top"] <= 2.5:
+                    groups[-1].append(w)
+                else:
+                    groups.append([w])
+            for g in groups:
+                cells = sorted(g, key=lambda w: w["x0"])
+                rows.append([w["text"] for w in cells])
+            for r in _parse_account_rows(rows):
+                if r["name"] in seen:  # まれに罫線の関係で重複行が出るため
+                    continue
+                seen.add(r["name"])
+                records.append(r)
     return records
 
 
