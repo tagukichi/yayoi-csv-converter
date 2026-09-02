@@ -129,6 +129,21 @@ CREATE TABLE IF NOT EXISTS partner_rows (
 )
 """
 
+# クライアント別の摘要辞書（弥生の摘要科目一覧から取り込む「事前登録」）。
+# 摘要 → 勘定科目 の対応。同じ摘要が複数の科目に登録されることもある
+# （「飲食代」が福利厚生費・交際費・会議費 など）
+_CREATE_DESC_DICT_SQL = """
+CREATE TABLE IF NOT EXISTS desc_dict (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    description TEXT NOT NULL,
+    account TEXT NOT NULL,
+    search_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, description, account)
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -239,6 +254,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_ACCOUNT_MASTER_SQL)
     conn.execute(_CREATE_DOCTYPE_RULES_SQL)
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
+    conn.execute(_CREATE_DESC_DICT_SQL)
     # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
@@ -590,6 +606,61 @@ def replace_account_master(client: str, records: list[dict], db_path: Path = DB_
                 (c["client"], c["name"], c["search_key"], c["side"], c["tax_class"])
                 for c in cleaned
             ],
+        )
+    return len(cleaned)
+
+
+# --- 摘要辞書（クライアント別・事前登録） ---
+
+
+def list_desc_dict(client: str, db_path: Path = DB_PATH) -> list[dict]:
+    """クライアントの摘要辞書（摘要→勘定科目）を返す（登録順）。"""
+    if _supabase_enabled(db_path):
+        return (
+            _sb().table("desc_dict").select("*")
+            .eq("client", client).order("id").execute().data
+        )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, description, account, search_key
+               FROM desc_dict WHERE client = ? ORDER BY id""",
+            (client,),
+        ).fetchall()
+    return [
+        {"id": r[0], "description": r[1], "account": r[2], "search_key": r[3]}
+        for r in rows
+    ]
+
+
+def replace_desc_dict(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:
+    """クライアントの摘要辞書を一括で置き換える。登録件数を返す。"""
+    seen: set[tuple[str, str]] = set()
+    cleaned = []
+    for r in records:
+        description = str(r.get("description", "") or "").strip()
+        account = str(r.get("account", "") or "").strip()
+        if not description or not account or (description, account) in seen:
+            continue
+        seen.add((description, account))
+        cleaned.append(
+            {
+                "client": client,
+                "description": description,
+                "account": account,
+                "search_key": str(r.get("search_key", "") or "").strip(),
+            }
+        )
+    if _supabase_enabled(db_path):
+        _sb().table("desc_dict").delete().eq("client", client).execute()
+        if cleaned:
+            _sb().table("desc_dict").insert(cleaned).execute()
+        return len(cleaned)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM desc_dict WHERE client = ?", (client,))
+        conn.executemany(
+            """INSERT INTO desc_dict (client, description, account, search_key)
+               VALUES (?, ?, ?, ?)""",
+            [(c["client"], c["description"], c["account"], c["search_key"]) for c in cleaned],
         )
     return len(cleaned)
 
