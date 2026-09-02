@@ -103,3 +103,15 @@ create table if not exists partner_rows (
   created_at timestamptz not null default now(),
   unique (client, side, row_no)
 );
+
+-- クライアント別の摘要辞書（弥生の摘要科目一覧から取り込む「事前登録」）
+-- 摘要 → 勘定科目 の対応（同じ摘要が複数の科目に登録されることもある）
+create table if not exists desc_dict (
+  id bigint generated always as identity primary key,
+  client text not null,
+  description text not null,
+  account text not null,
+  search_key text not null default '',
+  created_at timestamptz not null default now(),
+  unique (client, description, account)
+);
