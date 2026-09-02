@@ -47,9 +47,11 @@ from sales_parser import (
     parse_partner_ledger,
     tabular_rows_from_bytes,
 )
+from descdict import apply_desc_dictionary, dict_terms_by_account
 from submaster import (
     match_subaccount,
     parse_yayoi_account_pdf,
+    parse_yayoi_desc_dict_pdf,
     parse_yayoi_subaccount_pdf,
 )
 from yayoi_exporter import to_yayoi_csv
@@ -144,6 +146,19 @@ def account_options(target_client: str, df: pd.DataFrame) -> list[str]:
     return list(dict.fromkeys(master + _BUILTIN_ACCOUNTS + in_use))
 
 
+def desc_sync(changes: dict, terms_by_account: dict[str, list[str]]) -> dict:
+    """科目を変えたのに摘要は触っていない行について、新しい科目の辞書の摘要が
+    1つだけならそれを入れる（複数あるときは「摘要辞書から入れる」で選ぶ）。"""
+    if "摘要" in changes or not terms_by_account:
+        return {}
+    for acct_col in ("借方勘定科目", "貸方勘定科目"):
+        if acct_col in changes:
+            terms = terms_by_account.get(str(changes[acct_col] or "").strip(), [])
+            if len(terms) == 1:
+                return {"摘要": terms[0]}
+    return {}
+
+
 def tax_sync(changes: dict) -> dict:
     """科目を変えたのに税区分は触っていない行について、税区分を科目に合わせる。"""
     synced = {}
@@ -199,13 +214,14 @@ def persist_pending_edits(target_client: str) -> bool:
 
     full = storage.load_entries(target_client)
     shown = _shown_df(full)
+    _terms = dict_terms_by_account(storage.list_desc_dict(target_client))
     positions = list(shown.index)  # 表の行番号 → 全体のindex
     for row_pos, changes in edited.items():
         row_pos = int(row_pos)
         if row_pos < len(positions):
             idx = positions[row_pos]
             learn_from_row_edit(target_client, full.loc[idx, "摘要"], changes)
-            for col, value in {**changes, **tax_sync(changes)}.items():
+            for col, value in {**changes, **tax_sync(changes), **desc_sync(changes, _terms)}.items():
                 if col in full.columns:
                     full.loc[idx, col] = value
     if deleted:
@@ -415,7 +431,13 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
                                 registered.append(sub)
                     if registered:
                         st.caption("🆕 新しい取引先を補助科目マスタに登録しました: " + "、".join(registered))
-                    # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用
+                    # 摘要辞書（弥生の摘要科目一覧）で摘要・科目をその会社の流儀に揃える
+                    _dict = storage.list_desc_dict(client)
+                    if _dict:
+                        _dict_applied = apply_desc_dictionary(result.entries, _dict, context_text=preview)
+                        if _dict_applied:
+                            st.caption(f"📚 摘要辞書から {_dict_applied} 件の摘要・科目を決めました。")
+                    # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用（辞書より優先）
                     _desc_rules = storage.list_desc_rules(client)
                     if _desc_rules:
                         _replaced = apply_description_rules(result.entries, _desc_rules)
@@ -652,6 +674,7 @@ def render_ledger(client: str) -> None:
         T.notice("要確認の仕訳はありません。CSV出力に進めます。", kind="ok")
 
     _acct_options = account_options(client, full)
+    _dict_terms = dict_terms_by_account(storage.list_desc_dict(client))
     edited = st.data_editor(
         shown,
         num_rows="dynamic",
@@ -687,9 +710,9 @@ def render_ledger(client: str) -> None:
                             changes[col] = edited.loc[idx, col]
                     if changes:
                         learned_total += learn_from_row_edit(client, shown.loc[idx, "摘要"], changes)
-                        # 科目だけ変えた行は税区分も新しい科目に合わせる
-                        for tax_col, value in tax_sync(changes).items():
-                            edited.loc[idx, tax_col] = value
+                        # 科目だけ変えた行は税区分（と辞書の摘要が1つなら摘要）も合わせる
+                        for col, value in {**tax_sync(changes), **desc_sync(changes, _dict_terms)}.items():
+                            edited.loc[idx, col] = value
                 merged = _merge_editor_result(full, shown, edited)
                 saved = storage.replace_entries(client, merged)
                 message = f"{saved} 件を保存しました。"
@@ -722,6 +745,40 @@ def render_ledger(client: str) -> None:
             storage.clear_entries(client)
             bump_ledger()
             st.rerun()
+
+    # --- 摘要辞書から摘要を入れる（科目を選ぶ → その科目に登録された摘要を選ぶ） ---
+    with st.expander("📚 摘要辞書から摘要を入れる（科目を選んで、登録された摘要を選ぶ）"):
+        if not _dict_terms:
+            st.caption("「事前登録」の「③摘要辞書」に弥生の摘要科目一覧を登録すると使えます。")
+        else:
+            st.caption("選んだ勘定科目の行の摘要を、辞書に登録された摘要にまとめて入れ替えます。")
+            _accts_in_use = list(dict.fromkeys(
+                [a for a in merged["借方勘定科目"].astype(str) if a in _dict_terms]
+                + [a for a in merged["貸方勘定科目"].astype(str) if a in _dict_terms]
+            ))
+            if not _accts_in_use:
+                st.caption("今の仕訳に、辞書に摘要が登録されている科目はありません。")
+            else:
+                col_da, col_dt, col_dm = st.columns([2, 2, 2])
+                dict_account = col_da.selectbox("勘定科目", _accts_in_use, key="dict_account")
+                dict_term = col_dt.selectbox("摘要（辞書）", _dict_terms.get(dict_account, []), key="dict_term")
+                dict_mode = col_dm.radio("対象の行", ["要確認の行だけ", "その科目のすべての行"], key="dict_mode")
+                if st.button("摘要を入れる", key="dict_apply"):
+                    updated = merged.copy()
+                    mask = (updated["借方勘定科目"].astype(str) == dict_account) | (
+                        updated["貸方勘定科目"].astype(str) == dict_account
+                    )
+                    if dict_mode == "要確認の行だけ":
+                        mask &= updated["要確認"].astype(bool)
+                    count = int(mask.sum())
+                    if count == 0:
+                        st.warning("対象の行がありません。")
+                    else:
+                        updated.loc[mask, "摘要"] = dict_term
+                        storage.replace_entries(client, updated)
+                        st.session_state["flash"] = f"{count} 件の摘要を「{dict_term}」にしました。"
+                        bump_ledger()
+                        st.rerun()
 
     # --- 科目の一括置換（学習機能付き） ---
     with st.expander("🔁 科目の一括置換（次回からの自動適用も学習できます）"):
@@ -907,9 +964,10 @@ def render_export(client: str) -> None:
 def render_masters(client: str) -> None:
     _master = storage.list_subaccounts(client)
     _acct_master = storage.list_account_master(client)
+    _desc_dict = storage.list_desc_dict(client)
     T.page_header(
         NAV_MASTERS,
-        meta=f"{client} ・ 勘定科目 {len(_acct_master)}件 ・ 補助科目 {len(_master)}件",
+        meta=f"{client} ・ 勘定科目 {len(_acct_master)}件 ・ 補助科目 {len(_master)}件 ・ 摘要辞書 {len(_desc_dict)}件",
     )
     st.markdown(
         "クライアント企業ごとの弥生の科目体系を登録しておくと、通帳の摘要や売掛表・請求書の"
@@ -921,7 +979,13 @@ def render_masters(client: str) -> None:
     # 3つのカードに分ける。各タブの中身は下の with ブロックで描画する
     # （タブは作ったカードの中に表示される）
     # 補助科目と勘定科目のマスタは横並び2カラム
-    col_sub_master, col_acct_master = st.columns(2)
+    col_sub_master, col_acct_master, col_dict = st.columns(3)
+    with col_dict, st.container(border=True):
+        T.card_title(
+            f"📚 事前登録③：摘要辞書（{len(_desc_dict)} 件登録済み）" if _desc_dict else "📚 事前登録③：摘要辞書（未登録）",
+            "書類の内容に辞書の語（駐車料・タクシー代 など）があれば、その会社の流儀の摘要と科目が最初から入ります",
+        )
+        tab_dict_pdf, tab_dict_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
     with col_sub_master, st.container(border=True):
         T.card_title(
             f"🗂 事前登録①：補助科目マスタ（{len(_master)} 件登録済み）" if _master else "🗂 事前登録①：補助科目マスタ（未登録）",
@@ -940,6 +1004,67 @@ def render_masters(client: str) -> None:
             "書類タイプの紐付けと、行番号と取引先の対応。上の2つのマスタとは独立して設定できます",
         )
         tab_doctype, tab_rowmap = st.tabs(["🔗 書類タイプの紐付け", "🔢 売掛・買掛の行番号"])
+
+    # --- 摘要辞書: PDFから一括登録 ---
+    with tab_dict_pdf:
+        st.markdown(
+            """
+            **手順**
+            1. 弥生会計で「摘要辞書（摘要科目一覧）」を **PDF出力** します
+            2. そのPDFを下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+            """
+        )
+        dict_pdf = st.file_uploader("摘要科目一覧のPDF", type=["pdf"], key="dict_pdf", label_visibility="collapsed")
+        if dict_pdf is not None:
+            try:
+                dict_records = parse_yayoi_desc_dict_pdf(dict_pdf.getvalue())
+            except Exception as e:
+                dict_records = []
+                st.error(f"PDFの読み取りに失敗しました: {e}")
+            if not dict_records:
+                st.error("摘要辞書を読み取れませんでした。弥生の「摘要科目一覧」のPDFかどうか確認してください。")
+            else:
+                st.success(f"✅ {len(dict_records)} 件の摘要を読み取りました。内容を確認してください:")
+                summary = (
+                    pd.DataFrame(dict_records)
+                    .groupby("account", sort=False)
+                    .agg(件数=("description", "count"), 摘要の例=("description", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
+                    .rename_axis("勘定科目")
+                )
+                st.dataframe(summary, use_container_width=True, height=300)
+                if _desc_dict:
+                    st.caption(f"※ 登録すると「{client}」の既存の摘要辞書（{len(_desc_dict)}件）は置き換えられます。")
+                if st.button(f"この {len(dict_records)} 件を登録する", type="primary", key="dict_import"):
+                    saved = storage.replace_desc_dict(client, dict_records)
+                    st.session_state["sub_flash"] = f"✅ {saved} 件の摘要辞書を登録しました。"
+                    st.rerun()
+
+    # --- 摘要辞書: 確認・編集 ---
+    with tab_dict_list:
+        if not _desc_dict:
+            st.info("まだ登録されていません。「📄 PDFから一括登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            dict_view = pd.DataFrame(columns=["摘要", "勘定科目", "サーチキー"])
+        else:
+            dict_view = pd.DataFrame(_desc_dict)[["description", "account", "search_key"]].rename(
+                columns={"description": "摘要", "account": "勘定科目", "search_key": "サーチキー"}
+            )
+        edited_dict = st.data_editor(
+            dict_view, num_rows="dynamic", use_container_width=True, key="dict_editor",
+            column_config={
+                "摘要": st.column_config.TextColumn(help="弥生の摘要辞書の語（例: 駐車料、タクシー代）"),
+                "勘定科目": st.column_config.TextColumn(help="この摘要を使う勘定科目"),
+                "サーチキー": st.column_config.TextColumn(help="弥生のサーチキー数字"),
+            },
+        )
+        if st.button("💾 変更を保存", key="dict_save"):
+            records = [
+                {"description": r["摘要"], "account": r["勘定科目"], "search_key": r["サーチキー"]}
+                for _, r in edited_dict.iterrows()
+            ]
+            saved = storage.replace_desc_dict(client, records)
+            st.session_state["sub_flash"] = f"✅ {saved} 件の摘要辞書を保存しました。"
+            st.rerun()
 
     # --- 補助科目: PDFから一括登録 ---
     with tab_pdf_import:
