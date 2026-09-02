@@ -6,7 +6,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import storage
-from accounts import yayoi_tax
+from accounts import BS_ACCOUNTS, EXPENSE_RULES, INCOME_RULES, yayoi_tax
 from models import JournalEntry, ParseResult
 from ocr import (
     AzureOCRError,
@@ -124,7 +124,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.expander("📖 使い方", expanded=True):
+with st.expander("📖 使い方", expanded=False):
     st.markdown(
         """
         1. **書類タイプを選択** します（領収書／レシート・通帳・カード明細・給与台帳・
@@ -205,41 +205,40 @@ if not credentials_available():
         "（`.env.example` 参照）。"
     )
 
-# --- 事前登録: クライアント別の科目・補助科目マスタ ---
+# --- 事前登録: クライアント別のマスタ（補助科目／勘定科目／売掛・買掛の設定） ---
 _master = storage.list_subaccounts(client)
 _acct_master = storage.list_account_master(client)
-_master_label = (
-    f"科目・補助科目マスタ — {client}"
-    f"（勘定科目 {len(_acct_master)} 件・補助科目 {len(_master)} 件）"
-)
 
-with st.expander(f"🗂 事前登録：{_master_label}"):
+if sub_flash := st.session_state.pop("sub_flash", None):
+    st.success(sub_flash)
+
+# 3つの折りたたみに分ける。各タブの中身は下の with ブロックで描画する
+# （タブは作った折りたたみの中に表示される）
+_sub_label = f"補助科目 {len(_master)} 件登録済み" if _master else "補助科目 未登録"
+_acct_label = f"勘定科目 {len(_acct_master)} 件登録済み" if _acct_master else "勘定科目 未登録"
+
+with st.expander(f"🗂 事前登録①：補助科目マスタ — {client}（{_sub_label}）"):
     st.markdown(
-        "クライアント企業ごとの弥生の科目体系を登録しておくと、"
-        "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を"
-        "**自動で振り分け**られるようになります。"
+        "通帳の摘要（「フリコミ タマケンセツ」など）や売掛表・請求書の取引先から、"
+        "勘定科目・補助科目を**自動で振り分ける**ための登録です。"
     )
-    if sub_flash := st.session_state.pop("sub_flash", None):
-        st.success(sub_flash)
+    tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
 
-    (
-        tab_pdf_import,
-        tab_master_list,
-        tab_acct_pdf,
-        tab_acct_list,
-        tab_doctype,
-        tab_rowmap,
-    ) = st.tabs(
-        [
-            "📄 補助科目：PDF登録",
-            "📝 補助科目：確認・編集",
-            "📒 勘定科目：PDF登録",
-            "📒 勘定科目：確認・編集",
-            "🔗 書類タイプの紐付け",
-            "🔢 売掛・買掛の行番号",
-        ]
+with st.expander(f"📒 事前登録②：勘定科目マスタ — {client}（{_acct_label}）"):
+    st.markdown(
+        "クライアント企業の弥生の勘定科目一覧を登録しておくと、仕訳表の科目を"
+        "**プルダウンで選べる**ようになり、売上・買掛表の既定の科目もここから決まります。"
     )
+    tab_acct_pdf, tab_acct_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
 
+with st.expander("⚙️ 売掛・買掛の設定：書類タイプの紐付け／行番号と取引先の対応"):
+    st.markdown(
+        "売上（売掛表）・請求書・買掛表を仕訳にするときの設定です。"
+        "上の2つのマスタとは独立して設定できます。"
+    )
+    tab_doctype, tab_rowmap = st.tabs(["🔗 書類タイプの紐付け", "🔢 売掛・買掛の行番号"])
+
+with st.container():
     # --- PDFから一括登録 ---
     with tab_pdf_import:
         st.markdown(
@@ -503,7 +502,7 @@ if document_type in PARTNER_LEDGER_TYPES:
     st.caption(
         f"💡 取引先名（または行番号）と当月金額が並んだ表を読み取り、"
         f"月末日付・取引先ごとに1本の仕訳（税込10%）を作ります。{_how}"
-        "行番号だけの表は、上の「🗂 事前登録 → 🔢 売掛・買掛の行番号」で"
+        "行番号だけの表は、上の「⚙️ 売掛・買掛の設定 → 🔢 売掛・買掛の行番号」で"
         "取引先名を登録しておくと自動で名前が付きます。"
     )
 elif document_type in INVOICE_TYPES:
@@ -547,7 +546,7 @@ if document_type == "通帳":
             bank_sub = _bank_choice
     else:
         st.caption(
-            "💡 上の「🗂 事前登録」で普通預金の補助科目（銀行名）を登録すると、"
+            "💡 上の「🗂 事前登録①：補助科目マスタ」で普通預金の補助科目（銀行名）を登録すると、"
             "ここで口座を選べるようになります。"
         )
 
@@ -577,6 +576,44 @@ def _ledger_editor_key() -> str:
 
 def _bump_ledger() -> None:
     st.session_state["ledger_rev"] += 1
+
+
+# 組み込みルールが使う勘定科目（マスタ未登録のクライアントでもプルダウンに出す）
+_BUILTIN_ACCOUNTS = sorted(
+    set(BS_ACCOUNTS)
+    | {account for _kws, account in EXPENSE_RULES}
+    | {account for _kws, account in INCOME_RULES}
+    | {"雑費", "売上高", "雑収入", "現金", "普通預金", "未払金", "預り金", "諸口"}
+)
+
+
+def _account_options(target_client: str, df: pd.DataFrame) -> list[str]:
+    """仕訳表の勘定科目プルダウンの選択肢。
+
+    クライアントの勘定科目マスタ（事前登録）を優先し、組み込みの科目と
+    今の仕訳に入っている科目も含める（選択肢に無い値があると表示が
+    崩れるため）。
+    """
+    master = [r["name"] for r in storage.list_account_master(target_client)]
+    in_use = [
+        str(v).strip()
+        for col in ("借方勘定科目", "貸方勘定科目")
+        for v in df[col].tolist()
+        if str(v).strip()
+    ]
+    options = list(dict.fromkeys(master + _BUILTIN_ACCOUNTS + in_use))
+    return options
+
+
+def _tax_sync(changes: dict) -> dict:
+    """科目を変えたのに税区分は触っていない行について、税区分を科目に合わせる。"""
+    synced = {}
+    for acct_col, tax_col in (("借方勘定科目", "借方税区分"), ("貸方勘定科目", "貸方税区分")):
+        if acct_col in changes and tax_col not in changes:
+            account = str(changes[acct_col] or "").strip()
+            if account:
+                synced[tax_col] = yayoi_tax(account)
+    return synced
 
 
 def _learn_from_row_edit(target_client: str, original_desc, changes: dict) -> int:
@@ -627,7 +664,7 @@ def _persist_pending_edits(target_client: str) -> bool:
         row_idx = int(row_idx)
         if row_idx < len(df):
             _learn_from_row_edit(target_client, df.iloc[row_idx]["摘要"], changes)
-            for col, value in changes.items():
+            for col, value in {**changes, **_tax_sync(changes)}.items():
                 if col in df.columns:
                     df.iloc[row_idx, df.columns.get_loc(col)] = value
     if deleted:
@@ -919,12 +956,21 @@ else:
         if review_count:
             st.warning(f"⚠️ 要確認の仕訳が {review_count} 件あります。内容を確認し、修正したらチェックを外してください。")
 
+        _acct_options = _account_options(client, df)
         edited_df = st.data_editor(
             df,
             num_rows="dynamic",
             use_container_width=True,
             column_config={
                 "取引日付": st.column_config.TextColumn(help="YYYY/MM/DD 形式"),
+                "借方勘定科目": st.column_config.SelectboxColumn(
+                    options=_acct_options,
+                    help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
+                ),
+                "貸方勘定科目": st.column_config.SelectboxColumn(
+                    options=_acct_options,
+                    help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
+                ),
                 "金額": st.column_config.NumberColumn(min_value=0, step=1, format="localized"),
                 "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
                 "出典ファイル": st.column_config.TextColumn(disabled=True),
@@ -940,11 +986,14 @@ else:
                     learned_total = 0
                     for idx in df.index.intersection(edited_df.index):
                         changes = {}
-                        for col in ("摘要", "借方勘定科目", "貸方勘定科目"):
+                        for col in ("摘要", "借方勘定科目", "貸方勘定科目", "借方税区分", "貸方税区分"):
                             if str(df.loc[idx, col]) != str(edited_df.loc[idx, col]):
                                 changes[col] = edited_df.loc[idx, col]
                         if changes:
                             learned_total += _learn_from_row_edit(client, df.loc[idx, "摘要"], changes)
+                            # 科目だけ変えた行は税区分も新しい科目に合わせる
+                            for tax_col, value in _tax_sync(changes).items():
+                                edited_df.loc[idx, tax_col] = value
                     saved = storage.replace_entries(client, edited_df)
                     message = f"{saved} 件を保存しました。"
                     if learned_total:
