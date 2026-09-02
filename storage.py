@@ -85,6 +85,50 @@ CREATE TABLE IF NOT EXISTS desc_rules (
 )
 """
 
+# クライアント別の勘定科目マスタ（弥生の勘定科目一覧表から取り込む「事前登録」）
+_CREATE_ACCOUNT_MASTER_SQL = """
+CREATE TABLE IF NOT EXISTS account_master (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    name TEXT NOT NULL,
+    search_key TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL DEFAULT '借方',
+    tax_class TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, name)
+)
+"""
+
+# 書類タイプ→勘定科目の紐付け（クライアント別）。売上（売掛表）・請求書・
+# 買掛表の仕訳で使う借方/貸方科目と、取引先を補助科目に入れる側を保存する。
+# sub_side: debit=借方に取引先の補助科目, credit=貸方に
+_CREATE_DOCTYPE_RULES_SQL = """
+CREATE TABLE IF NOT EXISTS doctype_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    doc_type TEXT NOT NULL,
+    debit_account TEXT NOT NULL DEFAULT '',
+    credit_account TEXT NOT NULL DEFAULT '',
+    sub_side TEXT NOT NULL DEFAULT 'debit',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, doc_type)
+)
+"""
+
+# 売掛表・買掛表の「行番号 → 取引先名」の対応（クライアント別）。
+# side: sales=売掛表（売上）, purchase=買掛表
+_CREATE_PARTNER_ROWS_SQL = """
+CREATE TABLE IF NOT EXISTS partner_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'sales',
+    row_no INTEGER NOT NULL,
+    partner_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, side, row_no)
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -192,6 +236,9 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_RULES_SQL)
     conn.execute(_CREATE_DESC_RULES_SQL)
     conn.execute(_CREATE_SUBACCOUNTS_SQL)
+    conn.execute(_CREATE_ACCOUNT_MASTER_SQL)
+    conn.execute(_CREATE_DOCTYPE_RULES_SQL)
+    conn.execute(_CREATE_PARTNER_ROWS_SQL)
     # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
@@ -449,6 +496,210 @@ def replace_subaccounts(client: str, records: list[dict], db_path: Path = DB_PAT
         conn.executemany(
             "INSERT INTO subaccounts (client, account, sub_name, search_key) VALUES (?, ?, ?, ?)",
             [(c["client"], c["account"], c["sub_name"], c["search_key"]) for c in cleaned],
+        )
+    return len(cleaned)
+
+
+def add_subaccount(
+    client: str, account: str, sub_name: str, search_key: str = "", db_path: Path = DB_PATH
+) -> bool:
+    """補助科目を1件追記する（既存マスタは残す）。登録済みなら False。
+
+    売掛表・請求書に出てきた新しい取引先を「仕分けマスター」へ自動登録する
+    ときに使う（replace_subaccounts は全置き換えなので使えない）。
+    """
+    account, sub_name = account.strip(), sub_name.strip()
+    if not account or not sub_name:
+        return False
+    if _supabase_enabled(db_path):
+        existing = (
+            _sb().table("subaccounts").select("id").eq("client", client)
+            .eq("account", account).eq("sub_name", sub_name).execute().data
+        )
+        if existing:
+            return False
+        _sb().table("subaccounts").insert(
+            {
+                "client": client,
+                "account": account,
+                "sub_name": sub_name,
+                "search_key": search_key.strip().lower(),
+            }
+        ).execute()
+        return True
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO subaccounts (client, account, sub_name, search_key)
+               VALUES (?, ?, ?, ?)""",
+            (client, account, sub_name, search_key.strip().lower()),
+        )
+        return cur.rowcount > 0
+
+
+# --- 勘定科目マスタ（クライアント別・事前登録） ---
+
+
+def list_account_master(client: str, db_path: Path = DB_PATH) -> list[dict]:
+    """クライアントの勘定科目マスタを返す（登録順）。"""
+    if _supabase_enabled(db_path):
+        return (
+            _sb().table("account_master").select("*")
+            .eq("client", client).order("id").execute().data
+        )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, name, search_key, side, tax_class
+               FROM account_master WHERE client = ? ORDER BY id""",
+            (client,),
+        ).fetchall()
+    return [
+        {"id": r[0], "name": r[1], "search_key": r[2], "side": r[3], "tax_class": r[4]}
+        for r in rows
+    ]
+
+
+def replace_account_master(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:
+    """クライアントの勘定科目マスタを一括で置き換える。登録件数を返す。"""
+    seen: set[str] = set()
+    cleaned = []
+    for r in records:
+        name = str(r.get("name", "")).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(
+            {
+                "client": client,
+                "name": name,
+                "search_key": str(r.get("search_key", "") or "").strip(),
+                "side": str(r.get("side", "") or "借方").strip() or "借方",
+                "tax_class": str(r.get("tax_class", "") or "").strip(),
+            }
+        )
+    if _supabase_enabled(db_path):
+        _sb().table("account_master").delete().eq("client", client).execute()
+        if cleaned:
+            _sb().table("account_master").insert(cleaned).execute()
+        return len(cleaned)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM account_master WHERE client = ?", (client,))
+        conn.executemany(
+            """INSERT INTO account_master (client, name, search_key, side, tax_class)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (c["client"], c["name"], c["search_key"], c["side"], c["tax_class"])
+                for c in cleaned
+            ],
+        )
+    return len(cleaned)
+
+
+# --- 書類タイプ→勘定科目の紐付け（クライアント別） ---
+
+
+def get_doctype_rule(client: str, doc_type: str, db_path: Path = DB_PATH) -> dict | None:
+    """書類タイプに紐付けた勘定科目の設定を返す。未設定なら None。"""
+    if _supabase_enabled(db_path):
+        rows = (
+            _sb().table("doctype_rules").select("*")
+            .eq("client", client).eq("doc_type", doc_type).execute().data
+        )
+        return rows[0] if rows else None
+    with _connect(db_path) as conn:
+        r = conn.execute(
+            """SELECT debit_account, credit_account, sub_side FROM doctype_rules
+               WHERE client = ? AND doc_type = ?""",
+            (client, doc_type),
+        ).fetchone()
+    if r is None:
+        return None
+    return {"debit_account": r[0], "credit_account": r[1], "sub_side": r[2]}
+
+
+def set_doctype_rule(
+    client: str,
+    doc_type: str,
+    debit_account: str,
+    credit_account: str,
+    sub_side: str = "debit",
+    db_path: Path = DB_PATH,
+) -> None:
+    """書類タイプ→勘定科目の紐付けを保存する（同タイプは上書き）。"""
+    record = {
+        "client": client,
+        "doc_type": doc_type,
+        "debit_account": debit_account.strip(),
+        "credit_account": credit_account.strip(),
+        "sub_side": sub_side if sub_side in ("debit", "credit") else "debit",
+    }
+    if _supabase_enabled(db_path):
+        _sb().table("doctype_rules").upsert(
+            record, on_conflict="client,doc_type"
+        ).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO doctype_rules (client, doc_type, debit_account, credit_account, sub_side)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (client, doc_type) DO UPDATE SET
+                 debit_account = excluded.debit_account,
+                 credit_account = excluded.credit_account,
+                 sub_side = excluded.sub_side""",
+            (record["client"], record["doc_type"], record["debit_account"],
+             record["credit_account"], record["sub_side"]),
+        )
+
+
+# --- 売掛表・買掛表の行番号→取引先の対応（クライアント別） ---
+
+
+def list_partner_rows(client: str, side: str = "sales", db_path: Path = DB_PATH) -> list[dict]:
+    """行番号→取引先名の対応表を返す（行番号順）。"""
+    if _supabase_enabled(db_path):
+        return (
+            _sb().table("partner_rows").select("*")
+            .eq("client", client).eq("side", side).order("row_no").execute().data
+        )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, row_no, partner_name FROM partner_rows
+               WHERE client = ? AND side = ? ORDER BY row_no""",
+            (client, side),
+        ).fetchall()
+    return [{"id": r[0], "row_no": r[1], "partner_name": r[2]} for r in rows]
+
+
+def replace_partner_rows(
+    client: str, side: str, records: list[dict], db_path: Path = DB_PATH
+) -> int:
+    """行番号→取引先名の対応表を一括で置き換える。登録件数を返す。"""
+    seen: set[int] = set()
+    cleaned = []
+    for r in records:
+        try:
+            row_no = int(r.get("row_no"))
+        except (TypeError, ValueError):
+            continue
+        partner = str(r.get("partner_name", "") or "").strip()
+        if not partner or row_no in seen:
+            continue
+        seen.add(row_no)
+        cleaned.append(
+            {"client": client, "side": side, "row_no": row_no, "partner_name": partner}
+        )
+    if _supabase_enabled(db_path):
+        _sb().table("partner_rows").delete().eq("client", client).eq("side", side).execute()
+        if cleaned:
+            _sb().table("partner_rows").insert(cleaned).execute()
+        return len(cleaned)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "DELETE FROM partner_rows WHERE client = ? AND side = ?", (client, side)
+        )
+        conn.executemany(
+            """INSERT INTO partner_rows (client, side, row_no, partner_name)
+               VALUES (?, ?, ?, ?)""",
+            [(c["client"], c["side"], c["row_no"], c["partner_name"]) for c in cleaned],
         )
     return len(cleaned)
 

@@ -66,3 +66,40 @@ create table if not exists account_rules (
   created_at timestamptz not null default now(),
   unique (keyword, side)
 );
+
+-- クライアント別の勘定科目マスタ（弥生の勘定科目一覧表から取り込む「事前登録」）
+create table if not exists account_master (
+  id bigint generated always as identity primary key,
+  client text not null,
+  name text not null,
+  search_key text not null default '',
+  side text not null default '借方',        -- 貸借区分（借方/貸方）
+  tax_class text not null default '',       -- 弥生の税区分（対象外/課対仕入/課税売上 等）
+  created_at timestamptz not null default now(),
+  unique (client, name)
+);
+
+-- 書類タイプ→勘定科目の紐付け（クライアント別）。売上（売掛表）・請求書・
+-- 買掛表の仕訳で使う借方/貸方科目と、取引先を補助科目に入れる側。
+create table if not exists doctype_rules (
+  id bigint generated always as identity primary key,
+  client text not null,
+  doc_type text not null,
+  debit_account text not null default '',
+  credit_account text not null default '',
+  sub_side text not null default 'debit',   -- debit=借方に取引先の補助科目, credit=貸方に
+  created_at timestamptz not null default now(),
+  unique (client, doc_type)
+);
+
+-- 売掛表・買掛表の「行番号 → 取引先名」の対応（クライアント別）
+-- side: sales=売掛表（売上）, purchase=買掛表
+create table if not exists partner_rows (
+  id bigint generated always as identity primary key,
+  client text not null,
+  side text not null default 'sales',
+  row_no integer not null,
+  partner_name text not null,
+  created_at timestamptz not null default now(),
+  unique (client, side, row_no)
+);

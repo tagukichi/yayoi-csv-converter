@@ -25,7 +25,18 @@ from doc_parser import (
     parse_receipt_clusters,
     parse_table_document,
 )
+from sales_parser import (
+    INVOICE_TYPES,
+    PARTNER_LEDGER_TYPES,
+    default_doctype_rule,
+    parse_invoice,
+    parse_partner_ledger,
+    tabular_rows_from_bytes,
+)
 from yayoi_exporter import to_yayoi_csv
+
+# 表形式（xlsx/CSV）の自動解析に対応した新しい書類タイプ
+TABULAR_DOC_TYPES = PARTNER_LEDGER_TYPES + INVOICE_TYPES
 
 load_dotenv()
 
@@ -86,7 +97,7 @@ st.markdown(
         display: block;
     }
     [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
-        content: "1ファイル200MBまで ・ PDF / PNG / JPG / XLSX に対応";
+        content: "1ファイル200MBまで ・ PDF / PNG / JPG / XLSX / CSV に対応";
         font-size: 0.8rem;
         opacity: 0.6;
         display: block;
@@ -116,8 +127,10 @@ st.markdown(
 with st.expander("📖 使い方", expanded=True):
     st.markdown(
         """
-        1. **書類タイプを選択** します（通帳・カード明細・電子請求書・領収書／レシート）
-        2. **ファイルをアップロード** します（PDF・PNG・JPG・XLSX。複数まとめて選択できます）
+        1. **書類タイプを選択** します（領収書／レシート・通帳・カード明細・給与台帳・
+           売上（売掛表）・売上請求書・仕入請求書・買掛表 など）
+        2. **ファイルをアップロード** します（PDF・PNG・JPG・XLSX・CSV。複数まとめて選択できます）
+           - 買掛表は **ExcelやCSVのままアップロード** します（OCR不要でそのまま解析）。他の書類は写真・PDFでOKです
         3. **「変換を開始」** をクリックします（読み取りに数十秒かかることがあります）
         4. **「✏️ 仕訳の編集」** タブで内容を確認します
            - **「要確認」にチェックが付いた行**は、勘定科目を自動で判断できなかった行です。
@@ -140,7 +153,11 @@ with st.expander("📖 使い方", expanded=True):
 # マネーフォワード / freee は対応実装後に選択肢へ戻す（コードは温存して非表示）
 ACCOUNTING_SOFTWARE_OPTIONS = ["弥生"]  # + ["マネーフォワード", "freee"]
 
-from submaster import match_subaccount, parse_yayoi_subaccount_pdf  # noqa: E402
+from submaster import (  # noqa: E402
+    match_subaccount,
+    parse_yayoi_account_pdf,
+    parse_yayoi_subaccount_pdf,
+)
 
 # --- サイドバー ---
 with st.sidebar:
@@ -188,19 +205,40 @@ if not credentials_available():
         "（`.env.example` 参照）。"
     )
 
-# --- 事前登録: クライアント別の補助科目マスタ ---
+# --- 事前登録: クライアント別の科目・補助科目マスタ ---
 _master = storage.list_subaccounts(client)
-_master_label = f"補助科目マスタ — {client}（{len(_master)} 件登録済み）" if _master else f"補助科目マスタ — {client}（未登録）"
+_acct_master = storage.list_account_master(client)
+_master_label = (
+    f"科目・補助科目マスタ — {client}"
+    f"（勘定科目 {len(_acct_master)} 件・補助科目 {len(_master)} 件）"
+)
 
 with st.expander(f"🗂 事前登録：{_master_label}"):
     st.markdown(
-        "通帳の摘要（「フリコミ タマケンセツ」など）から、取引先の勘定科目・補助科目を"
-        "**自動で振り分ける**ための登録です。クライアント企業ごとに登録します。"
+        "クライアント企業ごとの弥生の科目体系を登録しておくと、"
+        "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を"
+        "**自動で振り分け**られるようになります。"
     )
     if sub_flash := st.session_state.pop("sub_flash", None):
         st.success(sub_flash)
 
-    tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
+    (
+        tab_pdf_import,
+        tab_master_list,
+        tab_acct_pdf,
+        tab_acct_list,
+        tab_doctype,
+        tab_rowmap,
+    ) = st.tabs(
+        [
+            "📄 補助科目：PDF登録",
+            "📝 補助科目：確認・編集",
+            "📒 勘定科目：PDF登録",
+            "📒 勘定科目：確認・編集",
+            "🔗 書類タイプの紐付け",
+            "🔢 売掛・買掛の行番号",
+        ]
+    )
 
     # --- PDFから一括登録 ---
     with tab_pdf_import:
@@ -295,10 +333,205 @@ with st.expander(f"🗂 事前登録：{_master_label}"):
             st.session_state["sub_flash"] = f"✅ {saved} 件を保存しました。"
             st.rerun()
 
+    # --- 勘定科目: PDFから一括登録 ---
+    with tab_acct_pdf:
+        st.markdown(
+            """
+            **手順**
+            1. 弥生会計で「勘定科目一覧表」を **PDF出力** します（科目設定の印刷）
+            2. そのPDFを下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+
+            登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
+            """
+        )
+        acct_pdf = st.file_uploader(
+            "勘定科目一覧表のPDF", type=["pdf"], key="acct_pdf",
+            label_visibility="collapsed",
+        )
+        if acct_pdf is not None:
+            try:
+                acct_records = parse_yayoi_account_pdf(acct_pdf.getvalue())
+            except Exception as e:
+                acct_records = []
+                st.error(f"PDFの読み取りに失敗しました: {e}")
+            if not acct_records:
+                st.error(
+                    "勘定科目を読み取れませんでした。"
+                    "弥生の「勘定科目一覧表」のPDFかどうか確認してください。"
+                )
+            else:
+                st.success(f"✅ {len(acct_records)} 件の勘定科目を読み取りました。内容を確認してください:")
+                st.dataframe(
+                    pd.DataFrame(acct_records).rename(
+                        columns={"name": "勘定科目", "search_key": "サーチキー",
+                                 "side": "貸借", "tax_class": "税区分"}
+                    ),
+                    use_container_width=True,
+                    height=300,
+                )
+                if _acct_master:
+                    st.caption(f"※ 登録すると「{client}」の既存の勘定科目マスタ（{len(_acct_master)}件）は置き換えられます。")
+                if st.button(f"この {len(acct_records)} 件を登録する", type="primary", key="acct_import"):
+                    saved = storage.replace_account_master(client, acct_records)
+                    st.session_state["sub_flash"] = f"✅ {saved} 件の勘定科目を登録しました。"
+                    st.rerun()
+
+    # --- 勘定科目: 確認・編集 ---
+    with tab_acct_list:
+        if not _acct_master:
+            st.info(
+                "まだ登録されていません。「📒 勘定科目：PDF登録」タブで弥生のPDFを"
+                "アップするか、下の表に直接入力して「保存」を押してください。"
+            )
+            acct_view = pd.DataFrame(columns=["勘定科目", "サーチキー", "貸借", "税区分"])
+        else:
+            acct_view = pd.DataFrame(_acct_master)[["name", "search_key", "side", "tax_class"]].rename(
+                columns={"name": "勘定科目", "search_key": "サーチキー", "side": "貸借", "tax_class": "税区分"}
+            )
+        edited_accts = st.data_editor(
+            acct_view, num_rows="dynamic", use_container_width=True, key="acct_editor",
+            column_config={
+                "勘定科目": st.column_config.TextColumn(help="弥生の科目名と1文字違わず同じにしてください"),
+                "サーチキー": st.column_config.TextColumn(help="弥生のサーチキー数字（例: 1101）"),
+                "貸借": st.column_config.SelectboxColumn(options=["借方", "貸方"]),
+                "税区分": st.column_config.TextColumn(help="例: 対象外、課対仕入、課税売上"),
+            },
+        )
+        if st.button("💾 変更を保存", key="acct_save"):
+            records = [
+                {"name": r["勘定科目"], "search_key": r["サーチキー"],
+                 "side": r["貸借"], "tax_class": r["税区分"]}
+                for _, r in edited_accts.iterrows()
+            ]
+            saved = storage.replace_account_master(client, records)
+            st.session_state["sub_flash"] = f"✅ {saved} 件の勘定科目を保存しました。"
+            st.rerun()
+
+    # --- 書類タイプ→科目の紐付け ---
+    with tab_doctype:
+        st.markdown(
+            "売上（売掛表）・請求書・買掛表を仕訳にするときの**借方・貸方の勘定科目**を、"
+            "書類タイプごとに設定します。取引先名は補助科目に入ります。"
+            "未設定でも、勘定科目マスタから既定の科目（完成工事未収入金・工事未払金 等）を自動で選びます。"
+        )
+        _acct_names = [r["name"] for r in _acct_master]
+        _doctype_inputs: dict[str, tuple[str, str, str]] = {}
+        for dt in ("売上", "売上請求書", "仕入請求書", "買掛表"):
+            current = storage.get_doctype_rule(client, dt) or default_doctype_rule(dt, _acct_names)
+            col_dt, col_debit, col_credit = st.columns([1, 2, 2])
+            col_dt.markdown(f"**{dt}**")
+            _options = list(dict.fromkeys(
+                [current["debit_account"], current["credit_account"]] + _acct_names
+            ))
+            debit = col_debit.selectbox(
+                "借方科目", _options,
+                index=_options.index(current["debit_account"]),
+                key=f"doctype_debit_{dt}",
+            )
+            credit = col_credit.selectbox(
+                "貸方科目", _options,
+                index=_options.index(current["credit_account"]),
+                key=f"doctype_credit_{dt}",
+            )
+            _doctype_inputs[dt] = (debit, credit, current["sub_side"])
+        st.caption(
+            "補助科目（取引先名）は、売上側は借方（売掛・未収系）、"
+            "仕入側は貸方（買掛・未払系）に自動で入ります。"
+        )
+        if st.button("💾 紐付けを保存", key="doctype_save"):
+            for dt, (debit, credit, sub_side) in _doctype_inputs.items():
+                storage.set_doctype_rule(client, dt, debit, credit, sub_side)
+            st.session_state["sub_flash"] = "✅ 書類タイプの紐付けを保存しました。"
+            st.rerun()
+
+    # --- 売掛表・買掛表の行番号→取引先 ---
+    with tab_rowmap:
+        st.markdown(
+            "売掛表・買掛表が**「行番号と金額だけ」**の形式のとき、"
+            "行番号を取引先名（補助科目）に変換するための対応表です。"
+            "取引先名の列がある表では登録不要です。"
+        )
+        rowmap_choice = st.radio(
+            "対象の表", ["売掛表（売上）", "買掛表"], horizontal=True, key="rowmap_side"
+        )
+        rowmap_side = "sales" if rowmap_choice.startswith("売掛") else "purchase"
+        _rowmap = storage.list_partner_rows(client, rowmap_side)
+        rowmap_view = (
+            pd.DataFrame(_rowmap)[["row_no", "partner_name"]].rename(
+                columns={"row_no": "行番号", "partner_name": "取引先名"}
+            )
+            if _rowmap
+            else pd.DataFrame(columns=["行番号", "取引先名"])
+        )
+        edited_rowmap = st.data_editor(
+            rowmap_view, num_rows="dynamic", use_container_width=True,
+            key=f"rowmap_editor_{rowmap_side}",
+            column_config={
+                "行番号": st.column_config.NumberColumn(min_value=1, step=1),
+                "取引先名": st.column_config.TextColumn(help="補助科目に入る取引先名。弥生の補助科目名と合わせてください"),
+            },
+        )
+        if st.button("💾 対応表を保存", key="rowmap_save"):
+            records = [
+                {"row_no": r["行番号"], "partner_name": r["取引先名"]}
+                for _, r in edited_rowmap.iterrows()
+                if pd.notna(r["行番号"])
+            ]
+            saved = storage.replace_partner_rows(client, rowmap_side, records)
+            st.session_state["sub_flash"] = f"✅ {rowmap_choice}の対応表 {saved} 件を保存しました。"
+            st.rerun()
+
 document_type = st.selectbox(
     "書類タイプ",
-    ["領収書", "電子請求書", "通帳", "カード明細", "給与台帳"],
+    [
+        "領収書", "電子請求書", "通帳", "カード明細", "給与台帳",
+        "売上", "売上請求書", "仕入請求書", "買掛表",
+    ],
+    help=(
+        "売上＝取引先別の月次売上一覧（売掛表）。買掛表のみ Excel（xlsx/CSV）で"
+        "アップロードします。他は写真・PDFで読み取ります。"
+    ),
 )
+
+if document_type in PARTNER_LEDGER_TYPES:
+    _how = (
+        "Excel（xlsx・CSV）のままアップロードしてください（OCR不要でそのまま解析）。"
+        if document_type == "買掛表"
+        else "写真・PDFでアップロードしてください。"
+    )
+    st.caption(
+        f"💡 取引先名（または行番号）と当月金額が並んだ表を読み取り、"
+        f"月末日付・取引先ごとに1本の仕訳（税込10%）を作ります。{_how}"
+        "行番号だけの表は、上の「🗂 事前登録 → 🔢 売掛・買掛の行番号」で"
+        "取引先名を登録しておくと自動で名前が付きます。"
+    )
+elif document_type in INVOICE_TYPES:
+    st.caption(
+        "💡 請求書の写真・PDFから「当月合計額＋消費税」を1本の仕訳にします。"
+        "取引先（宛名・発行者）は補助科目に入り、初めての取引先は"
+        "自動で補助科目マスタに登録されます。"
+    )
+
+# 買掛表はExcelでもらう運用のため、アップロードもExcel（xlsx/CSV）に限定する。
+# 他の書類タイプは従来どおり写真・PDF中心（xlsx/CSVも受け付ける）
+if document_type == "買掛表":
+    _upload_types = ["xlsx", "csv"]
+    _upload_help = "買掛表は Excel（XLSX）または CSV でアップロードしてください。"
+    # ドロップゾーンの案内文（CSSで日本語化している）も差し替える
+    st.markdown(
+        """
+        <style>
+        [data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+            content: "1ファイル200MBまで ・ XLSX / CSV に対応（買掛表はExcelのまま）";
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    _upload_types = ["pdf", "png", "jpg", "jpeg", "xlsx", "csv"]
+    _upload_help = "PDF・PNG・JPG・XLSX・CSV に対応しています。スマートフォンで撮影した領収書の写真も使えます。"
 
 # 通帳のときは、補助科目マスタ（普通預金）に登録された銀行から口座を選べる
 bank_sub = None
@@ -320,9 +553,9 @@ if document_type == "通帳":
 
 uploaded_files = st.file_uploader(
     "ファイルをアップロード（複数選択できます）",
-    type=["pdf", "png", "jpg", "jpeg", "xlsx"],
+    type=_upload_types,
     accept_multiple_files=True,
-    help="PDF・PNG・JPG・XLSX に対応しています。スマートフォンで撮影した領収書の写真も使えます。",
+    help=_upload_help,
 )
 
 # 同じファイルを2回アップロードして仕訳が重複する事故を防ぐ。
@@ -441,10 +674,48 @@ if st.button("変換を開始", type="primary"):
                 continue
             with st.expander(f"📄 {f.name}", expanded=False):
                 try:
-                    if f.name.lower().endswith(".xlsx"):
-                        df = pd.read_excel(f)
-                        st.dataframe(df)
-                        st.caption("xlsx の自動解析は未対応です（プレビューのみ）。")
+                    result = None
+                    preview = ""
+                    new_partners: list[str] = []
+                    is_tabular = f.name.lower().endswith((".xlsx", ".csv"))
+
+                    if is_tabular and document_type not in TABULAR_DOC_TYPES:
+                        if f.name.lower().endswith(".xlsx"):
+                            st.dataframe(pd.read_excel(f))
+                        else:
+                            st.dataframe(pd.DataFrame(tabular_rows_from_bytes(f.name, f.getvalue())))
+                        st.caption(
+                            "この書類タイプでは xlsx / CSV はプレビューのみです。自動解析は"
+                            "書類タイプ「売上」「売上請求書」「仕入請求書」「買掛表」で対応しています。"
+                        )
+                    elif is_tabular:
+                        # 売上（売掛表）・請求書・買掛表: xlsx / CSV を直接解析（OCR不要）
+                        rows = tabular_rows_from_bytes(f.name, f.getvalue())
+                        subs_master = storage.list_subaccounts(client)
+                        acct_names = [r["name"] for r in storage.list_account_master(client)]
+                        rule = storage.get_doctype_rule(client, document_type) or default_doctype_rule(
+                            document_type, acct_names
+                        )
+                        if document_type in PARTNER_LEDGER_TYPES:
+                            _side = "sales" if document_type == "売上" else "purchase"
+                            pmap = {
+                                r["row_no"]: r["partner_name"]
+                                for r in storage.list_partner_rows(client, _side)
+                            }
+                            result, new_partners = parse_partner_ledger(
+                                rows, document_type, source_name=f.name, rule=rule,
+                                partner_map=pmap, subaccounts=subs_master,
+                                custom_expense_rules=learned_expense,
+                                custom_income_rules=learned_income,
+                            )
+                        else:
+                            result, new_partners = parse_invoice(
+                                rows, document_type, client_name=client, source_name=f.name,
+                                rule=rule, subaccounts=subs_master, account_names=acct_names,
+                            )
+                        preview = "\n".join(
+                            " | ".join(c for c in row if c) for row in rows if any(row)
+                        )
                     else:
                         # スマホ写真などの大きな画像はOCRの上限(4MB)内に自動圧縮
                         file_bytes, compress_note = compress_image_if_needed(
@@ -456,103 +727,152 @@ if st.button("変換を開始", type="primary"):
                             ocr_lines = run_ocr_lines(file_bytes)
                         texts = [ln.text for ln in ocr_lines]
 
-                        # 領収書×写真は、複数レシートの可能性を最優先で確認する。
-                        # 駐車場領収書等は「カード利用明細」等の印字を含み、書類
-                        # タイプの自動判定がカード明細に誤反応するため、複数の
-                        # かたまりを検出したら自動判定より分割解析を優先する
-                        receipt_clusters = None
-                        if document_type == "領収書" and is_image_filename(f.name):
-                            _clusters = split_text_clusters(ocr_lines)
-                            if len(_clusters) > 1:
-                                receipt_clusters = _clusters
-
-                        # 書類タイプの選び間違い対策: OCR内容から自動判定し、
-                        # 選択と食い違っていれば判定結果の方で解析する
-                        effective_type = document_type
-                        if receipt_clusters is None:
-                            detected = detect_document_type(texts, selected=document_type)
-                            if detected and detected != document_type:
-                                effective_type = detected
-                                st.info(
-                                    f"書類の内容から「{detected}」と判定して解析しました"
-                                    f"（書類タイプの選択は「{document_type}」でした）。"
+                        if document_type in TABULAR_DOC_TYPES:
+                            # 売上・請求書・買掛表をPDF・画像でもらった場合はOCR経由で
+                            # 解析する。読み取り誤りがあり得るため要確認を立て、
+                            # 取引先の自動登録もしない
+                            subs_master = storage.list_subaccounts(client)
+                            acct_names = [r["name"] for r in storage.list_account_master(client)]
+                            rule = storage.get_doctype_rule(client, document_type) or default_doctype_rule(
+                                document_type, acct_names
+                            )
+                            if document_type in INVOICE_TYPES:
+                                result, _ = parse_invoice(
+                                    [[t] for t in texts], document_type,
+                                    client_name=client, source_name=f.name,
+                                    rule=rule, subaccounts=subs_master,
+                                    account_names=acct_names, force_review=True,
                                 )
-
-                        if receipt_clusters is not None:
-                            result = parse_receipt_clusters(
-                                [[ln.text for ln in cluster] for cluster in receipt_clusters],
-                                source_name=f.name,
-                                custom_expense_rules=learned_expense,
-                                client_name=client,
-                            )
-                            st.info(
-                                f"1枚の画像から {len(result.entries)} 件のレシートを検出し、"
-                                "それぞれ解析しました（結果はすべて要確認です）。"
-                            )
-                            preview = "\n\n――― レシート区切り ―――\n\n".join(
-                                "\n".join(ln.text for ln in cluster)
-                                for cluster in receipt_clusters
-                            )
-                        elif effective_type == "給与台帳":
-                            rows = group_rows(ocr_lines)
-                            result = parse_payroll(rows, source_name=f.name)
-                            preview = "\n".join(
-                                " | ".join(c.text for c in row) for row in rows
-                            )
-                        elif effective_type in ("通帳", "カード明細"):
-                            # 座標で表の行を復元してから解析する
-                            rows = group_rows(ocr_lines)
-                            result = parse_table_document(
-                                rows, effective_type, source_name=f.name,
-                                custom_expense_rules=learned_expense,
-                                custom_income_rules=learned_income,
-                            )
-                            preview = "\n".join(
-                                " | ".join(c.text for c in row) for row in rows
-                            )
-                            if effective_type == "通帳":
-                                # 銀行（口座）の補助科目と、摘要↔補助科目マスタの突合
-                                subs_master = storage.list_subaccounts(client)
-                                matched_count = 0
+                            else:
+                                _side = "sales" if document_type == "売上" else "purchase"
+                                pmap = {
+                                    r["row_no"]: r["partner_name"]
+                                    for r in storage.list_partner_rows(client, _side)
+                                }
+                                result, _ = parse_partner_ledger(
+                                    [[c.text for c in row] for row in group_rows(ocr_lines)],
+                                    document_type, source_name=f.name, rule=rule,
+                                    partner_map=pmap, subaccounts=subs_master,
+                                    custom_expense_rules=learned_expense,
+                                    custom_income_rules=learned_income,
+                                )
                                 for e in result.entries:
-                                    is_deposit = e.debit_account == "普通預金"
-                                    if bank_sub:
-                                        if is_deposit:
-                                            e.debit_sub = bank_sub
-                                        elif e.credit_account == "普通預金":
-                                            e.credit_sub = bank_sub
-                                    if not subs_master:
-                                        continue
-                                    matched = match_subaccount(
-                                        e.description, subs_master,
-                                        side="deposit" if is_deposit else "withdrawal",
-                                    )
-                                    if matched:
-                                        matched_count += 1
-                                        if is_deposit:
-                                            e.credit_account = matched["account"]
-                                            e.credit_sub = matched["sub_name"]
-                                            e.credit_tax = yayoi_tax(matched["account"])
-                                        else:
-                                            e.debit_account = matched["account"]
-                                            e.debit_sub = matched["sub_name"]
-                                            e.debit_tax = yayoi_tax(matched["account"])
-                                        # 名前の直接一致は確定扱い。サーチキー経由は
-                                        # 略称ゆえ誤マッチがあり得るため要確認を残す。
-                                        # 残高不一致・年仮定（note あり）の行も残す
-                                        if matched["by"] == "name" and not e.note:
-                                            e.needs_review = False
-                                if matched_count:
-                                    st.caption(
-                                        f"🔎 補助科目マスタと {matched_count} 件の摘要が一致しました。"
-                                    )
-                        else:
-                            result = parse_document(
-                                texts, effective_type, source_name=f.name,
-                                custom_expense_rules=learned_expense,
-                                client_name=client,
-                            )
+                                    e.needs_review = True
                             preview = "\n".join(texts)
+                        else:
+                            # 領収書×写真は、複数レシートの可能性を最優先で確認する。
+                            # 駐車場領収書等は「カード利用明細」等の印字を含み、書類
+                            # タイプの自動判定がカード明細に誤反応するため、複数の
+                            # かたまりを検出したら自動判定より分割解析を優先する
+                            receipt_clusters = None
+                            if document_type == "領収書" and is_image_filename(f.name):
+                                _clusters = split_text_clusters(ocr_lines)
+                                if len(_clusters) > 1:
+                                    receipt_clusters = _clusters
+
+                            # 書類タイプの選び間違い対策: OCR内容から自動判定し、
+                            # 選択と食い違っていれば判定結果の方で解析する
+                            effective_type = document_type
+                            if receipt_clusters is None:
+                                detected = detect_document_type(texts, selected=document_type)
+                                if detected and detected != document_type:
+                                    effective_type = detected
+                                    st.info(
+                                        f"書類の内容から「{detected}」と判定して解析しました"
+                                        f"（書類タイプの選択は「{document_type}」でした）。"
+                                    )
+
+                            if receipt_clusters is not None:
+                                result = parse_receipt_clusters(
+                                    [[ln.text for ln in cluster] for cluster in receipt_clusters],
+                                    source_name=f.name,
+                                    custom_expense_rules=learned_expense,
+                                    client_name=client,
+                                )
+                                st.info(
+                                    f"1枚の画像から {len(result.entries)} 件のレシートを検出し、"
+                                    "それぞれ解析しました（結果はすべて要確認です）。"
+                                )
+                                preview = "\n\n――― レシート区切り ―――\n\n".join(
+                                    "\n".join(ln.text for ln in cluster)
+                                    for cluster in receipt_clusters
+                                )
+                            elif effective_type == "給与台帳":
+                                rows = group_rows(ocr_lines)
+                                result = parse_payroll(rows, source_name=f.name)
+                                preview = "\n".join(
+                                    " | ".join(c.text for c in row) for row in rows
+                                )
+                            elif effective_type in ("通帳", "カード明細"):
+                                # 座標で表の行を復元してから解析する
+                                rows = group_rows(ocr_lines)
+                                result = parse_table_document(
+                                    rows, effective_type, source_name=f.name,
+                                    custom_expense_rules=learned_expense,
+                                    custom_income_rules=learned_income,
+                                )
+                                preview = "\n".join(
+                                    " | ".join(c.text for c in row) for row in rows
+                                )
+                                if effective_type == "通帳":
+                                    # 銀行（口座）の補助科目と、摘要↔補助科目マスタの突合
+                                    subs_master = storage.list_subaccounts(client)
+                                    matched_count = 0
+                                    for e in result.entries:
+                                        is_deposit = e.debit_account == "普通預金"
+                                        if bank_sub:
+                                            if is_deposit:
+                                                e.debit_sub = bank_sub
+                                            elif e.credit_account == "普通預金":
+                                                e.credit_sub = bank_sub
+                                        if not subs_master:
+                                            continue
+                                        matched = match_subaccount(
+                                            e.description, subs_master,
+                                            side="deposit" if is_deposit else "withdrawal",
+                                        )
+                                        if matched:
+                                            matched_count += 1
+                                            if is_deposit:
+                                                e.credit_account = matched["account"]
+                                                e.credit_sub = matched["sub_name"]
+                                                e.credit_tax = yayoi_tax(matched["account"])
+                                            else:
+                                                e.debit_account = matched["account"]
+                                                e.debit_sub = matched["sub_name"]
+                                                e.debit_tax = yayoi_tax(matched["account"])
+                                            # 名前の直接一致は確定扱い。サーチキー経由は
+                                            # 略称ゆえ誤マッチがあり得るため要確認を残す。
+                                            # 残高不一致・年仮定（note あり）の行も残す
+                                            if matched["by"] == "name" and not e.note:
+                                                e.needs_review = False
+                                    if matched_count:
+                                        st.caption(
+                                            f"🔎 補助科目マスタと {matched_count} 件の摘要が一致しました。"
+                                        )
+                            else:
+                                result = parse_document(
+                                    texts, effective_type, source_name=f.name,
+                                    custom_expense_rules=learned_expense,
+                                    client_name=client,
+                                )
+                                preview = "\n".join(texts)
+
+                    if result is not None:
+                        # 売掛表・請求書に出てきた新しい取引先を補助科目マスタへ
+                        # 自動登録する（次回から突合・振り分けが効く）
+                        registered: list[str] = []
+                        for e in result.entries:
+                            sub = e.debit_sub or e.credit_sub
+                            if sub and sub in new_partners:
+                                account = e.debit_account if e.debit_sub else e.credit_account
+                                if storage.add_subaccount(client, account, sub):
+                                    registered.append(sub)
+                        if registered:
+                            st.caption(
+                                "🆕 新しい取引先を補助科目マスタに登録しました: "
+                                + "、".join(registered)
+                            )
                         # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用
                         _desc_rules = storage.list_desc_rules(client)
                         if _desc_rules:
@@ -569,7 +889,7 @@ if st.button("変換を開始", type="primary"):
                                 f"{added} 件の仕訳を追加しました"
                                 f"（うち要確認 {review} 件）。"
                             )
-                        st.text_area("OCR結果", preview, height=200, key=f"ocr_{i}")
+                        st.text_area("読み取り結果", preview, height=200, key=f"ocr_{i}")
                 except AzureOCRError as e:
                     st.error(f"OCRエラー: {e}")
                 except Exception as e:
