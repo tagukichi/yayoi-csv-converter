@@ -920,13 +920,15 @@ def render_masters(client: str) -> None:
 
     # 3つのカードに分ける。各タブの中身は下の with ブロックで描画する
     # （タブは作ったカードの中に表示される）
-    with st.container(border=True):
+    # 補助科目と勘定科目のマスタは横並び2カラム
+    col_sub_master, col_acct_master = st.columns(2)
+    with col_sub_master, st.container(border=True):
         T.card_title(
             f"🗂 事前登録①：補助科目マスタ（{len(_master)} 件登録済み）" if _master else "🗂 事前登録①：補助科目マスタ（未登録）",
             "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を自動で振り分けるための登録",
         )
         tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
-    with st.container(border=True):
+    with col_acct_master, st.container(border=True):
         T.card_title(
             f"📒 事前登録②：勘定科目マスタ（{len(_acct_master)} 件登録済み）" if _acct_master else "📒 事前登録②：勘定科目マスタ（未登録）",
             "仕訳表の科目をプルダウンで選べるようになり、売上・買掛表の既定の科目もここから決まります",
