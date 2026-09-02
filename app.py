@@ -217,16 +217,18 @@ if sub_flash := st.session_state.pop("sub_flash", None):
 _sub_label = f"補助科目 {len(_master)} 件登録済み" if _master else "補助科目 未登録"
 _acct_label = f"勘定科目 {len(_acct_master)} 件登録済み" if _acct_master else "勘定科目 未登録"
 
-with st.expander(f"🗂 事前登録①：補助科目マスタ — {client}（{_sub_label}）"):
+# 補助科目と勘定科目のマスタは横並び2カラム
+col_sub_master, col_acct_master = st.columns(2)
+with col_sub_master, st.expander(f"🗂 事前登録①：補助科目マスタ（{_sub_label}）"):
     st.markdown(
         "通帳の摘要（「フリコミ タマケンセツ」など）や売掛表・請求書の取引先から、"
         "勘定科目・補助科目を**自動で振り分ける**ための登録です。"
     )
     tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
 
-with st.expander(f"📒 事前登録②：勘定科目マスタ — {client}（{_acct_label}）"):
+with col_acct_master, st.expander(f"📒 事前登録②：勘定科目マスタ（{_acct_label}）"):
     st.markdown(
-        "クライアント企業の弥生の勘定科目一覧を登録しておくと、仕訳表の科目を"
+        "弥生の勘定科目一覧を登録しておくと、仕訳表の科目を"
         "**プルダウンで選べる**ようになり、売上・買掛表の既定の科目もここから決まります。"
     )
     tab_acct_pdf, tab_acct_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
