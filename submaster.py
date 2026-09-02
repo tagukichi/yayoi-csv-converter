@@ -167,6 +167,64 @@ def parse_yayoi_account_pdf(file_bytes: bytes) -> list[dict]:
     return records
 
 
+# --- 弥生 摘要辞書（摘要科目一覧）PDF の解析 ---
+
+
+def _parse_desc_dict_rows(rows: list[list[str]]) -> list[dict]:
+    """摘要辞書の行（セル文字列のリスト）から (摘要, 勘定科目, サーチキー) を抽出する。
+
+    行の形は「摘要 勘定科目 サーチキー数字 [○]」。摘要に空白が入ることが
+    あるため、末尾の数字（サーチキー）の直前を勘定科目、その前を摘要とする。
+    末尾の「○」は非表示なので除く。
+    """
+    records: list[dict] = []
+    for cells in rows:
+        cells = [c for c in cells if c.strip()]
+        hidden = False
+        if cells and cells[-1] == "○":
+            hidden = True
+            cells = cells[:-1]
+        if len(cells) < 3 or not re.fullmatch(r"\d+", cells[-1]):
+            continue  # タイトル・表ヘッダ・フッター（会社名）
+        if hidden:
+            continue
+        search_key = cells[-1]
+        account = cells[-2]
+        description = " ".join(cells[:-2]).strip()
+        if not description or not account:
+            continue
+        records.append({"description": description, "account": account, "search_key": search_key})
+    return records
+
+
+def parse_yayoi_desc_dict_pdf(file_bytes: bytes) -> list[dict]:
+    """弥生「摘要辞書（摘要科目一覧）」PDFから 摘要→勘定科目 の一覧を抽出する。
+
+    戻り値: {"description", "account", "search_key"} のリスト。
+    """
+    import pdfplumber
+
+    records: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            words = sorted(page.extract_words(), key=lambda w: w["top"])
+            groups: list[list] = []
+            for w in words:
+                if groups and w["top"] - groups[-1][-1]["top"] <= 2.5:
+                    groups[-1].append(w)
+                else:
+                    groups.append([w])
+            rows = [[w["text"] for w in sorted(g, key=lambda w: w["x0"])] for g in groups]
+            for r in _parse_desc_dict_rows(rows):
+                key = (r["description"], r["account"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(r)
+    return records
+
+
 # --- 摘要との突合 ---
 
 # 法人格などの表記ゆれで一致を妨げる断片（正規化時に除去）
