@@ -70,7 +70,23 @@ NAV_LEDGER = "仕訳の編集"
 NAV_EXPORT = "弥生CSV出力"
 NAV_MASTERS = "事前登録"
 NAV_RULES = "学習ルール"
-NAV_ITEMS = [NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_MASTERS, NAV_RULES]
+# 作業の順番どおりに並べる: 事前登録（会社ごとに最初の1回）→ 日々の取り込み・
+# 編集・出力 → 学習ルール
+NAV_ITEMS = [NAV_MASTERS, NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_RULES]
+
+
+def setup_status(client: str) -> list[tuple[str, int]]:
+    """事前登録（補助科目・勘定科目・摘要辞書）の登録件数。"""
+    return [
+        ("補助科目", len(storage.list_subaccounts(client))),
+        ("勘定科目", len(storage.list_account_master(client))),
+        ("摘要辞書", len(storage.list_desc_dict(client))),
+    ]
+
+
+def setup_done(client: str) -> bool:
+    """事前登録が3つとも済んでいるか。"""
+    return all(count for _name, count in setup_status(client))
 
 
 # =====================================================================
@@ -315,11 +331,7 @@ def render_import(client: str) -> None:
         )
 
     # --- 事前登録のチェックリスト（3つ揃うまで案内を出す） ---
-    _setup_items = [
-        ("補助科目", len(storage.list_subaccounts(client))),
-        ("勘定科目", len(storage.list_account_master(client))),
-        ("摘要辞書", len(storage.list_desc_dict(client))),
-    ]
+    _setup_items = setup_status(client)
     if any(count == 0 for _name, count in _setup_items):
         _status = " ／ ".join(
             f"{name} ✅ {count}件" if count else f"{name} ⬜ 未登録" for name, count in _setup_items
@@ -1005,19 +1017,19 @@ def render_masters(client: str) -> None:
             f"📚 事前登録③：摘要辞書（{len(_desc_dict)} 件登録済み）" if _desc_dict else "📚 事前登録③：摘要辞書（未登録）",
             "書類の内容に辞書の語（駐車料・タクシー代 など）があれば、その会社の流儀の摘要と科目が最初から入ります",
         )
-        tab_dict_pdf, tab_dict_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
+        tab_dict_pdf, tab_dict_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
     with col_sub_master, st.container(border=True):
         T.card_title(
             f"🗂 事前登録①：補助科目マスタ（{len(_master)} 件登録済み）" if _master else "🗂 事前登録①：補助科目マスタ（未登録）",
             "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を自動で振り分けるための登録",
         )
-        tab_pdf_import, tab_master_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
+        tab_pdf_import, tab_master_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
     with col_acct_master, st.container(border=True):
         T.card_title(
             f"📒 事前登録②：勘定科目マスタ（{len(_acct_master)} 件登録済み）" if _acct_master else "📒 事前登録②：勘定科目マスタ（未登録）",
             "仕訳表の科目をプルダウンで選べるようになり、売上・買掛表の既定の科目もここから決まります",
         )
-        tab_acct_pdf, tab_acct_list = st.tabs(["📄 PDFから一括登録", "📝 登録内容の確認・編集"])
+        tab_acct_pdf, tab_acct_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
     with st.container(border=True):
         T.card_title(
             "⚙️ 売掛・買掛の設定",
@@ -1063,7 +1075,7 @@ def render_masters(client: str) -> None:
     # --- 摘要辞書: 確認・編集 ---
     with tab_dict_list:
         if not _desc_dict:
-            st.info("まだ登録されていません。「📄 PDFから一括登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             dict_view = pd.DataFrame(columns=["摘要", "勘定科目", "サーチキー"])
         else:
             dict_view = pd.DataFrame(_desc_dict)[["description", "account", "search_key"]].rename(
@@ -1124,7 +1136,7 @@ def render_masters(client: str) -> None:
     # --- 補助科目: 確認・編集 ---
     with tab_master_list:
         if not _master:
-            st.info("まだ登録されていません。「📄 補助科目：PDF登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             master_view = pd.DataFrame(columns=["勘定科目", "補助科目", "サーチキー"])
             account_filter = "すべて"
         else:
@@ -1199,7 +1211,7 @@ def render_masters(client: str) -> None:
     # --- 勘定科目: 確認・編集 ---
     with tab_acct_list:
         if not _acct_master:
-            st.info("まだ登録されていません。「📒 勘定科目：PDF登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             acct_view = pd.DataFrame(columns=["勘定科目", "サーチキー", "貸借", "税区分"])
         else:
             acct_view = pd.DataFrame(_acct_master)[["name", "search_key", "side", "tax_class"]].rename(
