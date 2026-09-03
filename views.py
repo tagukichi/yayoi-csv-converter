@@ -712,19 +712,29 @@ def render_ledger(client: str) -> None:
         num_rows="dynamic",
         use_container_width=True,
         height=min(60 + 35 * max(len(shown), 3), 620),
+        # 列幅を指定して、摘要（読みながら直す列）が切れないようにする
         column_config={
             "取引日付": st.column_config.TextColumn(help="YYYY/MM/DD 形式", width="small"),
             "借方勘定科目": st.column_config.SelectboxColumn(
-                options=_acct_options,
+                options=_acct_options, width="small",
                 help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
             ),
+            "借方補助科目": st.column_config.TextColumn(width="small"),
+            "借方税区分": st.column_config.TextColumn(width="small"),
             "貸方勘定科目": st.column_config.SelectboxColumn(
-                options=_acct_options,
+                options=_acct_options, width="small",
                 help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
             ),
-            "金額": st.column_config.NumberColumn(min_value=0, step=1, format="localized"),
-            "要確認": st.column_config.CheckboxColumn(help="確認が済んだらチェックを外す"),
-            "出典ファイル": st.column_config.TextColumn(disabled=True),
+            "貸方補助科目": st.column_config.TextColumn(width="small"),
+            "貸方税区分": st.column_config.TextColumn(width="small"),
+            "金額": st.column_config.NumberColumn(
+                min_value=0, step=1, format="localized", width="small"
+            ),
+            "摘要": st.column_config.TextColumn(width="large"),
+            "要確認": st.column_config.CheckboxColumn(
+                help="確認が済んだらチェックを外す", width="small"
+            ),
+            "出典ファイル": st.column_config.TextColumn(disabled=True, width="small"),
         },
         key=ledger_editor_key(),
     )
@@ -1008,28 +1018,35 @@ def render_masters(client: str) -> None:
     if sub_flash := st.session_state.pop("sub_flash", None):
         st.success(sub_flash)
 
-    # 3つのカードに分ける。各タブの中身は下の with ブロックで描画する
-    # （タブは作ったカードの中に表示される）
-    # 補助科目と勘定科目のマスタは横並び2カラム
+    # 上段は3つのカードでPDF登録だけを並べ、表（確認・編集）は下に全幅で置く。
+    # 表を3カラムに入れると狭くて編集しづらいため。
     col_sub_master, col_acct_master, col_dict = st.columns(3)
-    with col_dict, st.container(border=True):
-        T.card_title(
-            f"📚 事前登録③：摘要辞書（{len(_desc_dict)} 件登録済み）" if _desc_dict else "📚 事前登録③：摘要辞書（未登録）",
-            "書類の内容に辞書の語（駐車料・タクシー代 など）があれば、その会社の流儀の摘要と科目が最初から入ります",
-        )
-        tab_dict_pdf, tab_dict_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
     with col_sub_master, st.container(border=True):
         T.card_title(
             f"🗂 事前登録①：補助科目マスタ（{len(_master)} 件登録済み）" if _master else "🗂 事前登録①：補助科目マスタ（未登録）",
             "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を自動で振り分けるための登録",
         )
-        tab_pdf_import, tab_master_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
+        box_sub_pdf = st.container()
     with col_acct_master, st.container(border=True):
         T.card_title(
             f"📒 事前登録②：勘定科目マスタ（{len(_acct_master)} 件登録済み）" if _acct_master else "📒 事前登録②：勘定科目マスタ（未登録）",
             "仕訳表の科目をプルダウンで選べるようになり、売上・買掛表の既定の科目もここから決まります",
         )
-        tab_acct_pdf, tab_acct_list = st.tabs(["📄 PDFで登録", "📝 確認・編集"])
+        box_acct_pdf = st.container()
+    with col_dict, st.container(border=True):
+        T.card_title(
+            f"📚 事前登録③：摘要辞書（{len(_desc_dict)} 件登録済み）" if _desc_dict else "📚 事前登録③：摘要辞書（未登録）",
+            "書類の内容に辞書の語（駐車料・タクシー代 など）があれば、その会社の流儀の摘要と科目が最初から入ります",
+        )
+        box_dict_pdf = st.container()
+
+    # 登録内容の確認・編集（全幅・タブで切り替え）
+    with st.container(border=True):
+        T.card_title("📝 登録内容の確認・編集", "表を直接編集して「変更を保存」を押すと、登録内容を書き換えられます")
+        tab_master_list, tab_acct_list, tab_dict_list = st.tabs(
+            ["🗂 補助科目", "📒 勘定科目", "📚 摘要辞書"]
+        )
+
     with st.container(border=True):
         T.card_title(
             "⚙️ 売掛・買掛の設定",
@@ -1038,15 +1055,15 @@ def render_masters(client: str) -> None:
         tab_doctype, tab_rowmap = st.tabs(["🔗 書類タイプの紐付け", "🔢 売掛・買掛の行番号"])
 
     # --- 摘要辞書: PDFから一括登録 ---
-    with tab_dict_pdf:
-        st.markdown(
-            """
-            **手順**
-            1. 弥生会計で「摘要辞書（摘要科目一覧）」を **PDF出力** します
-            2. そのPDFを下にアップロードします
-            3. 読み取り結果を確認して「登録する」を押します
-            """
-        )
+    with box_dict_pdf:
+        with st.expander("📖 手順"):
+            st.markdown(
+                """
+                1. 弥生会計で「摘要辞書（摘要科目一覧）」を **PDF出力** します
+                2. そのPDFを下にアップロードします
+                3. 読み取り結果を確認して「登録する」を押します
+                """
+            )
         dict_pdf = st.file_uploader("摘要科目一覧のPDF", type=["pdf"], key="dict_pdf", label_visibility="collapsed")
         if dict_pdf is not None:
             try:
@@ -1075,7 +1092,7 @@ def render_masters(client: str) -> None:
     # --- 摘要辞書: 確認・編集 ---
     with tab_dict_list:
         if not _desc_dict:
-            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。上の「PDFで登録」から弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             dict_view = pd.DataFrame(columns=["摘要", "勘定科目", "サーチキー"])
         else:
             dict_view = pd.DataFrame(_desc_dict)[["description", "account", "search_key"]].rename(
@@ -1099,15 +1116,15 @@ def render_masters(client: str) -> None:
             st.rerun()
 
     # --- 補助科目: PDFから一括登録 ---
-    with tab_pdf_import:
-        st.markdown(
-            """
-            **手順**
-            1. 弥生会計で［集計表］→［補助科目一覧表］を **PDF出力** します
-            2. そのPDFを下にアップロードします
-            3. 読み取り結果を確認して「登録する」を押します
-            """
-        )
+    with box_sub_pdf:
+        with st.expander("📖 手順"):
+            st.markdown(
+                """
+                1. 弥生会計で［集計表］→［補助科目一覧表］を **PDF出力** します
+                2. そのPDFを下にアップロードします
+                3. 読み取り結果を確認して「登録する」を押します
+                """
+            )
         sub_pdf = st.file_uploader("補助科目一覧表のPDF", type=["pdf"], key="sub_pdf", label_visibility="collapsed")
         if sub_pdf is not None:
             try:
@@ -1136,7 +1153,7 @@ def render_masters(client: str) -> None:
     # --- 補助科目: 確認・編集 ---
     with tab_master_list:
         if not _master:
-            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。上の「PDFで登録」から弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             master_view = pd.DataFrame(columns=["勘定科目", "補助科目", "サーチキー"])
             account_filter = "すべて"
         else:
@@ -1173,17 +1190,17 @@ def render_masters(client: str) -> None:
             st.rerun()
 
     # --- 勘定科目: PDFから一括登録 ---
-    with tab_acct_pdf:
-        st.markdown(
-            """
-            **手順**
-            1. 弥生会計で「勘定科目一覧表」を **PDF出力** します（科目設定の印刷）
-            2. そのPDFを下にアップロードします
-            3. 読み取り結果を確認して「登録する」を押します
+    with box_acct_pdf:
+        with st.expander("📖 手順"):
+            st.markdown(
+                """
+                1. 弥生会計で「勘定科目一覧表」を **PDF出力** します（科目設定の印刷）
+                2. そのPDFを下にアップロードします
+                3. 読み取り結果を確認して「登録する」を押します
 
-            登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
-            """
-        )
+                登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
+                """
+            )
         acct_pdf = st.file_uploader("勘定科目一覧表のPDF", type=["pdf"], key="acct_pdf", label_visibility="collapsed")
         if acct_pdf is not None:
             try:
@@ -1211,7 +1228,7 @@ def render_masters(client: str) -> None:
     # --- 勘定科目: 確認・編集 ---
     with tab_acct_list:
         if not _acct_master:
-            st.info("まだ登録されていません。「📄 PDFで登録」タブで弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
+            st.info("まだ登録されていません。上の「PDFで登録」から弥生のPDFをアップするか、下の表に直接入力して「保存」を押してください。")
             acct_view = pd.DataFrame(columns=["勘定科目", "サーチキー", "貸借", "税区分"])
         else:
             acct_view = pd.DataFrame(_acct_master)[["name", "search_key", "side", "tax_class"]].rename(
