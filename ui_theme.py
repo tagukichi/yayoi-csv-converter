@@ -51,26 +51,26 @@ h1, h2, h3 {{ letter-spacing: 0.01em; }}
 
 /* ---------- サイドバー ---------- */
 section[data-testid="stSidebar"] {{
-    width: 280px !important;
+    width: 300px !important;
     border-right: 0;
 }}
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div > div {{
-    font-size: 13px;
+    font-size: 15px;
 }}
 section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{
     padding: 1.2rem 0.9rem 1rem 0.9rem;
 }}
 .yc-logo {{
     display: flex; align-items: center; gap: 10px;
-    padding: 2px 6px 12px 6px; color: #ffffff;
-    font-size: 15px; font-weight: 700; letter-spacing: 0.02em;
+    padding: 2px 6px 14px 6px; color: #ffffff;
+    font-size: 18px; font-weight: 700; letter-spacing: 0.02em;
 }}
 .yc-logo .mark {{
-    width: 28px; height: 28px; border-radius: 7px; background: {ACCENT_LIGHT};
+    width: 32px; height: 32px; border-radius: 8px; background: {ACCENT_LIGHT};
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }}
 .yc-side-label {{
-    font-size: 10px; color: #9aa3c0; margin: 6px 6px 2px 6px;
+    font-size: 12px; color: #9aa3c0; margin: 8px 6px 3px 6px;
 }}
 /* クライアント選択（サイドバー内のセレクトボックス） */
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div {{
@@ -86,14 +86,14 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] summary {{
     color: #9aa3c0; padding: 4px 6px;
 }}
 section[data-testid="stSidebar"] [data-testid="stExpander"] summary p {{
-    font-size: 12px; white-space: nowrap;
+    font-size: 14px; white-space: nowrap;
 }}
 /* ナビ（ラジオをナビ風に） */
 section[data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] {{
     gap: 2px;
 }}
 section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] {{
-    padding: 9px 12px; border-radius: 8px; margin: 0; width: 100%;
+    padding: 12px 14px; border-radius: 8px; margin: 0; width: 100%;
     color: #c0c6dd; cursor: pointer; align-items: center;
     transition: background 0.12s ease;
 }}
@@ -104,22 +104,24 @@ section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="rad
     display: none;  /* ラジオの丸を隠す */
 }}
 section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"] p {{
-    color: inherit; font-size: 13px; margin: 0;
+    color: inherit; font-size: 15px; margin: 0;
 }}
 section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {{
     background: {ACCENT_LIGHT}; color: #ffffff; font-weight: 700;
 }}
-/* 4つ目（事前登録）の前に区切り線 */
-section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(4) {{
+/* 事前登録（1つ目）と日々の作業、学習ルール（5つ目）の間に区切り線 */
+section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(2),
+section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(5) {{
     margin-top: 10px; position: relative;
 }}
-section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(4)::before {{
+section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(2)::before,
+section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-of-type(5)::before {{
     content: ""; position: absolute; left: 4px; right: 4px; top: -6px;
     height: 1px; background: rgba(255,255,255,0.08);
 }}
 .yc-side-footer {{
-    margin-top: 18px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);
-    font-size: 11px; color: #9aa3c0; display: flex; flex-direction: column; gap: 6px;
+    margin-top: 20px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.08);
+    font-size: 12.5px; color: #9aa3c0; display: flex; flex-direction: column; gap: 6px;
 }}
 .yc-side-footer .dot {{
     display: inline-block; width: 7px; height: 7px; border-radius: 50%;
@@ -218,6 +220,12 @@ section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="rad
 }}
 
 /* ---------- ボタン ---------- */
+/* Streamlit の既定は上下の余白が薄いので、押しやすい高さにする */
+button[data-testid="stBaseButton-primary"],
+button[data-testid="stBaseButton-secondary"],
+[data-testid="stDownloadButton"] button {{
+    padding: 0.6rem 1.4rem; min-height: 2.9rem; font-size: 15px;
+}}
 button[data-testid="stBaseButton-primary"] {{
     background: {ACCENT}; border-color: {ACCENT}; font-weight: 700;
 }}
@@ -238,11 +246,11 @@ button[data-testid="stBaseButton-secondary"] {{
 /* ---------- 書類タイプのチップ（pills） ---------- */
 button[data-testid="stBaseButton-pills"] {{
     background: #f1f1ee; border: 0; color: #454a59; border-radius: 8px;
-    padding: 6px 14px;
+    padding: 9px 18px; font-size: 14px;
 }}
 button[data-testid="stBaseButton-pillsActive"] {{
     background: {ACCENT}; border: 0; color: #ffffff; border-radius: 8px;
-    padding: 6px 14px; font-weight: 700;
+    padding: 9px 18px; font-size: 14px; font-weight: 700;
 }}
 button[data-testid="stBaseButton-pillsActive"] p, button[data-testid="stBaseButton-pillsActive"] span {{
     color: #ffffff;
@@ -264,16 +272,19 @@ section[data-testid="stFileUploaderDropzone"] {{
     content: var(--yc-upload-note, "1ファイル200MBまで ・ PDF / PNG / JPG / XLSX / CSV に対応");
     font-size: 12px; color: {MUTED}; display: block; margin-top: 0.25rem;
 }}
+/* 「Browse files」ボタンは文字だけ隠し、::after で日本語を重ねる。
+   重ねる文字の分の幅・高さを min-width / min-height で確保する */
 [data-testid="stFileUploaderDropzone"] button {{
     visibility: hidden; position: relative;
     background: {ACCENT}; border-color: {ACCENT};
+    min-width: 190px; min-height: 3.2rem; padding: 0.7rem 1.8rem;
 }}
 [data-testid="stFileUploaderDropzone"] button::after {{
     content: "ファイルを選択";
     visibility: visible; position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
     white-space: nowrap; background: {ACCENT}; color: #ffffff;
-    border-radius: 8px; font-weight: 700;
+    border-radius: 8px; font-weight: 700; font-size: 16px;
 }}
 
 /* ---------- 仕訳表 ---------- */

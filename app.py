@@ -96,10 +96,17 @@ with st.sidebar:
         label = f"{icons[item]} {item}"
         if item == views.NAV_LEDGER and review_n:
             label += f" :orange-background[{review_n}]"
+        if item == views.NAV_MASTERS and client and not views.setup_done(client):
+            label += " :orange-background[要]"
         return label
 
+    # 事前登録が済んでいない企業では「事前登録」から、済んでいれば
+    # 「書類の取り込み」から始める（最初の描画時のみ効く）
     nav = st.radio(
         "メニュー", views.NAV_ITEMS, format_func=_nav_label,
+        index=views.NAV_ITEMS.index(
+            views.NAV_IMPORT if client and views.setup_done(client) else views.NAV_MASTERS
+        ),
         key="nav", label_visibility="collapsed",
     )
 
