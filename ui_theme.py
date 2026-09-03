@@ -275,9 +275,20 @@ button[data-testid="stBaseButton-pillsActive"] p, button[data-testid="stBaseButt
 }}
 
 /* ---------- ファイルアップローダ（ドロップゾーンの日本語化と装飾） ---------- */
+/* 案内文はCSSで差し替えている都合で元より行数が増える。横並びのままだと
+   狭い幅で文字が枠からはみ出して重なるため、常に縦積み（文言→ボタン）にし、
+   高さは内容に合わせて伸びるようにする */
 section[data-testid="stFileUploaderDropzone"] {{
     background: #ffffff; border: 1.5px dashed #b9bdd4; border-radius: 12px;
-    padding: 28px 20px;
+    padding: 22px 18px;
+    display: flex; flex-direction: column; align-items: stretch;
+    height: auto; min-height: 0; gap: 14px;
+}}
+[data-testid="stFileUploaderDropzoneInstructions"] {{
+    align-items: flex-start; height: auto; margin: 0; padding: 0;
+}}
+[data-testid="stFileUploaderDropzoneInstructions"] > div {{
+    height: auto; min-width: 0;
 }}
 [data-testid="stFileUploaderDropzoneInstructions"] > div > span {{
     display: none;
@@ -295,7 +306,8 @@ section[data-testid="stFileUploaderDropzone"] {{
 [data-testid="stFileUploaderDropzone"] button {{
     visibility: hidden; position: relative;
     background: {ACCENT}; border-color: {ACCENT};
-    min-width: 190px; min-height: 3.2rem; padding: 0.7rem 1.8rem;
+    width: 100%; min-width: 0; min-height: 3.2rem; margin: 0;
+    padding: 0.7rem 1.8rem;
 }}
 [data-testid="stFileUploaderDropzone"] button::after {{
     content: "ファイルを選択";

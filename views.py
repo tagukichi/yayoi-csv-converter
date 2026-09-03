@@ -1018,6 +1018,9 @@ def render_masters(client: str) -> None:
     if sub_flash := st.session_state.pop("sub_flash", None):
         st.success(sub_flash)
 
+    # この画面のアップロードは弥生のPDFのみ。カードの幅が狭いので案内文も短くする
+    T.set_upload_note("弥生から出力したPDF ・ 200MBまで")
+
     # 上段は3つのカードでPDF登録だけを並べ、表（確認・編集）は下に全幅で置く。
     # 表を3カラムに入れると狭くて編集しづらいため。
     col_sub_master, col_acct_master, col_dict = st.columns(3)
