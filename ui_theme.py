@@ -14,7 +14,7 @@ import html
 
 import streamlit as st
 
-SERVICE_NAME = "[サービス名]"
+SERVICE_NAME = "弥生CSV"
 OFFICE_LABEL = "[事務所名] ・ 管理者"
 
 # デザイントークン
@@ -26,8 +26,10 @@ AMBER_BG = "#faf1df"
 AMBER_TEXT = "#8a5c14"
 GREEN = "#1e7f5c"
 GREEN_BG = "#e7f4ee"
-GRAY_TEXT = "#6b7183"
-MUTED = "#8a8f9e"
+# 補足テキストの色。薄いと読みにくいので、白背景で十分なコントラストが
+# 出る濃さにしている（WCAG AA を満たす水準）
+GRAY_TEXT = "#4b5162"
+MUTED = "#5c6270"
 BORDER = "#e6e5e0"
 
 _FONT_LINK = (
@@ -44,7 +46,10 @@ _CSS = f"""
 .block-container {{
     padding-top: 1.4rem;
     padding-bottom: 2rem;
-    max-width: 1240px;
+    /* 表（仕訳・マスタ）が横スクロールしないよう、画面幅いっぱいまで使う */
+    max-width: 1900px;
+    padding-left: 2rem;
+    padding-right: 2rem;
 }}
 header[data-testid="stHeader"] {{ background: transparent; }}
 h1, h2, h3 {{ letter-spacing: 0.01em; }}
@@ -142,6 +147,19 @@ section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="rad
     background: #ffffff;
     border-color: {BORDER} !important;
     border-radius: 10px !important;
+}}
+/* 本文エリアの折りたたみ（手順・一括置換など）も白いカードに揃える */
+section[data-testid="stMain"] [data-testid="stExpander"] details {{
+    background: #ffffff;
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+section[data-testid="stMain"] [data-testid="stExpander"] summary:hover {{
+    background: #fbfbf9;
+}}
+/* 「まだ登録されていません」等の案内は文字色を濃く（既定は薄い青） */
+section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
+    color: #20242e;
 }}
 .yc-card-title {{
     font-size: 13px; font-weight: 700; color: #454a59; margin: 2px 0 6px 0;
