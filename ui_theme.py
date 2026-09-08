@@ -32,6 +32,8 @@ GRAY_TEXT = "#4b5162"
 MUTED = "#5c6270"
 BORDER = "#e6e5e0"
 HEADER_H = "56px"
+# カードの影（白いカードを背景から浮かせる）
+SHADOW = "0 1px 2px rgba(16,24,40,0.05), 0 6px 16px rgba(16,24,40,0.06)"
 
 _FONT_LINK = (
     '<link rel="stylesheet" '
@@ -121,8 +123,14 @@ section[data-testid="stSidebar"] {{
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div > div {{
     font-size: 15px;
 }}
+/* サイドバーの中身は上端に寄せる。既定ではロゴ用の空きスペース（32px）と
+   上余白が入るので、それらを詰める（開閉ボタンはヘッダーへ移してある） */
 section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{
-    padding: 1.2rem 0.9rem 1rem 0.9rem;
+    padding: 0.55rem 0.9rem 1rem 0.9rem !important;
+}}
+[data-testid="stLogoSpacer"] {{ display: none !important; }}
+section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {{
+    height: 0 !important; min-height: 0 !important; padding: 0 !important;
 }}
 .yc-logo {{
     display: flex; align-items: center; gap: 10px;
@@ -195,23 +203,38 @@ section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="rad
 /* ---------- ヘッダーバー ---------- */
 .yc-header {{
     display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px;
-    padding: 12px 20px; margin-bottom: 16px;
+    background: #ffffff; border: 1px solid {BORDER}; border-radius: 12px;
+    padding: 14px 20px; margin-bottom: 18px; box-shadow: {SHADOW};
 }}
 .yc-header .title {{ font-size: 16px; font-weight: 700; color: #20242e; }}
 .yc-header .meta {{ margin-left: auto; font-size: 12px; color: {GRAY_TEXT}; }}
 
 /* ---------- カード ---------- */
+/* Streamlit 1.50 の st.container(border=True) は stVerticalBlock を描く。
+   key を付けると st-key-<key> クラスが付くので、それを目印に白いカードにする */
+[class*="st-key-yccard"] {{
+    background: #ffffff !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 12px !important;
+    box-shadow: {SHADOW};
+    padding: 18px 20px !important;
+}}
 [data-testid="stVerticalBlockBorderWrapper"] {{
     background: #ffffff;
     border-color: {BORDER} !important;
-    border-radius: 10px !important;
+    border-radius: 12px !important;
+    box-shadow: {SHADOW};
 }}
 /* 本文エリアの折りたたみ（手順・一括置換など）も白いカードに揃える */
 section[data-testid="stMain"] [data-testid="stExpander"] details {{
     background: #ffffff;
     border: 1px solid {BORDER};
-    border-radius: 10px;
+    border-radius: 12px;
+    box-shadow: {SHADOW};
+}}
+/* カードの中に置く折りたたみ・表は、影が重ならないよう控えめにする */
+[class*="st-key-yccard"] [data-testid="stExpander"] details {{
+    box-shadow: none; background: #fbfbf9;
 }}
 section[data-testid="stMain"] [data-testid="stExpander"] summary:hover {{
     background: #fbfbf9;
@@ -274,7 +297,7 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 .yc-summary .value.warn {{ font-size: 15px; color: {AMBER}; }}
 
 /* ---------- 取り込みログ ---------- */
-.yc-log {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
+.yc-log {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 12px; overflow: hidden; box-shadow: {SHADOW}; }}
 .yc-log .head {{
     padding: 12px 18px; border-bottom: 1px solid #eeede9; display: flex; align-items: center;
     font-size: 15px; font-weight: 700; color: #454a59;
@@ -303,7 +326,7 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 .yc-table td.num, .yc-table th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .yc-table td.no {{ color: {MUTED}; }}
 .yc-table td.desc {{ color: #454a59; }}
-.yc-table-wrap {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
+.yc-table-wrap {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 12px; overflow: hidden; box-shadow: {SHADOW}; }}
 .yc-table-wrap .head {{
     padding: 12px 18px; border-bottom: 1px solid #eeede9; display: flex; align-items: center;
     font-size: 15px; font-weight: 700; color: #454a59;
@@ -398,6 +421,8 @@ section[data-testid="stFileUploaderDropzone"] {{
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{
     border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; background: #ffffff;
 }}
+/* サマリーカードも白＋影に揃える */
+.yc-summary .card {{ box-shadow: {SHADOW}; border-radius: 12px; }}
 </style>
 """
 
@@ -434,9 +459,8 @@ def pill(text: str, kind: str = "info") -> str:
 
 def notice(text: str, kind: str = "warn") -> None:
     """黄色（warn）／緑（ok）のお知らせバナー。"""
-    icon = "⚠️" if kind == "warn" else "✅"
     st.markdown(
-        f'<div class="yc-notice {kind}"><span>{icon}</span><span>{html.escape(text)}</span></div>',
+        f'<div class="yc-notice {kind}">{html.escape(text)}</div>',
         unsafe_allow_html=True,
     )
 
