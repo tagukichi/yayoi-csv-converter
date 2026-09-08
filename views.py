@@ -1035,14 +1035,14 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
     info = _MASTER_KINDS[kind]
     meta = storage.get_master_meta(client, kind)
     if count:
+        detail = (
+            f'📄 {html.escape(meta["file_name"])}'
+            f'<br><span class="when">{html.escape(meta["registered_at"])} に登録</span>'
+            if meta and meta["file_name"]
+            else '<span class="when">登録元のファイルは記録されていません</span>'
+        )
         st.markdown(
-            T.pill(f"✅ 登録済み {count}件", "ok")
-            + (
-                f'<div class="yc-registered">📄 {html.escape(meta["file_name"])}'
-                f'<br><span>{html.escape(meta["registered_at"])} に登録</span></div>'
-                if meta and meta["file_name"]
-                else '<div class="yc-registered"><span>登録元のファイルは記録されていません</span></div>'
-            ),
+            f'<div class="yc-registered"><span class="done">✅ 登録済み {count}件</span>{detail}</div>',
             unsafe_allow_html=True,
         )
         if st.button("🗑 削除して登録し直す", key=f"reset_{kind}", use_container_width=True):
