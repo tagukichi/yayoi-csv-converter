@@ -31,6 +31,7 @@ GREEN_BG = "#e7f4ee"
 GRAY_TEXT = "#4b5162"
 MUTED = "#5c6270"
 BORDER = "#e6e5e0"
+HEADER_H = "56px"
 
 _FONT_LINK = (
     '<link rel="stylesheet" '
@@ -44,15 +45,55 @@ _CSS = f"""
 <style>
 /* ---------- 全体 ---------- */
 .block-container {{
-    padding-top: 1.4rem;
+    padding-top: 1.6rem;
     padding-bottom: 2rem;
     /* 表（仕訳・マスタ）が横スクロールしないよう、画面幅いっぱいまで使う */
     max-width: 1900px;
     padding-left: 2rem;
     padding-right: 2rem;
 }}
-header[data-testid="stHeader"] {{ background: transparent; }}
 h1, h2, h3 {{ letter-spacing: 0.01em; }}
+/* ---------- ヘッダー（サイドバーと同じ紺。左端にサイドバーの表示切替） ---------- */
+header[data-testid="stHeader"] {{
+    background: {NAVY};
+    left: 0 !important; width: 100% !important;
+    height: {HEADER_H}; min-height: {HEADER_H};
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    z-index: 999999;
+    display: flex; align-items: center;
+}}
+header[data-testid="stHeader"]::after {{
+    content: "{SERVICE_NAME}";
+    color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.02em;
+    /* 常に左端（開閉ボタンの右）に置く。order/margin-right で他の要素を右へ寄せ、
+       flex: 0 0 auto と nowrap で折り返さないようにする */
+    order: -1; margin-left: 60px; margin-right: auto;
+    flex: 0 0 auto; white-space: nowrap;
+}}
+/* サイドバーはヘッダーの下から始める */
+section[data-testid="stSidebar"] {{
+    top: {HEADER_H} !important;
+    height: calc(100vh - {HEADER_H}) !important;
+}}
+/* サイドバーの開閉ボタンをヘッダーの左端に固定して常に表示する
+   （既定はサイドバーの上にあり、マウスを乗せるまで見えない） */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stExpandSidebarButton"] {{
+    position: fixed !important; top: 9px !important; left: 12px !important;
+    z-index: 1000000 !important; opacity: 1 !important; visibility: visible !important;
+    display: block !important;
+}}
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="stExpandSidebarButton"] button {{
+    color: #ffffff !important; background: transparent !important; border: 0 !important;
+    min-height: 0 !important; padding: 6px !important;
+}}
+[data-testid="stSidebarCollapseButton"] button:hover,
+[data-testid="stExpandSidebarButton"] button:hover {{
+    background: rgba(255,255,255,0.12) !important;
+}}
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stExpandSidebarButton"] svg {{ fill: #ffffff !important; color: #ffffff !important; }}
 
 /* ---------- サイドバー ---------- */
 section[data-testid="stSidebar"] {{
@@ -162,9 +203,15 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
     color: #20242e;
 }}
 .yc-card-title {{
-    font-size: 13px; font-weight: 700; color: #454a59; margin: 2px 0 6px 0;
+    font-size: 15px; font-weight: 700; color: #454a59; margin: 2px 0 6px 0;
 }}
-.yc-hint {{ font-size: 12px; color: {MUTED}; }}
+.yc-hint {{ font-size: 13px; color: {MUTED}; }}
+/* 事前登録カードの「登録済み」表示（ファイル名と登録日時） */
+.yc-registered {{
+    margin-top: 10px; font-size: 14px; color: #20242e; line-height: 1.6;
+    word-break: break-all;
+}}
+.yc-registered span {{ font-size: 12.5px; color: {GRAY_TEXT}; }}
 
 /* ---------- ピル・バッジ ---------- */
 .yc-pill {{
@@ -178,7 +225,7 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 
 /* ---------- お知らせ（黄色バナー） ---------- */
 .yc-notice {{
-    padding: 10px 16px; border-radius: 8px; font-size: 13px;
+    padding: 11px 16px; border-radius: 8px; font-size: 14px;
     display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
 }}
 .yc-notice.warn {{ background: {AMBER_BG}; color: {AMBER_TEXT}; }}
@@ -203,21 +250,24 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 .yc-log {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
 .yc-log .head {{
     padding: 12px 18px; border-bottom: 1px solid #eeede9; display: flex; align-items: center;
-    font-size: 13px; font-weight: 700; color: #454a59;
+    font-size: 15px; font-weight: 700; color: #454a59;
 }}
 .yc-log .head span {{ margin-left: auto; font-size: 12px; font-weight: 400; color: {MUTED}; }}
 .yc-log .row {{
     display: flex; align-items: center; gap: 14px; padding: 10px 18px;
-    border-bottom: 1px solid #f2f1ed; font-size: 13px;
+    border-bottom: 1px solid #f2f1ed; font-size: 14px;
 }}
 .yc-log .row:last-child {{ border-bottom: 0; }}
 .yc-log .row .name {{ flex-grow: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.yc-log .row .name .at {{
+    margin-left: 10px; font-size: 12px; color: {GRAY_TEXT}; font-variant-numeric: tabular-nums;
+}}
 .yc-log .row .detail {{ font-size: 12px; color: {GRAY_TEXT}; }}
 .yc-log .row.skip .name, .yc-log .row.skip .detail {{ color: {MUTED}; }}
 .yc-log .empty {{ padding: 18px; font-size: 12px; color: {MUTED}; }}
 
 /* ---------- 出力プレビュー表 ---------- */
-.yc-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+.yc-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
 .yc-table th {{
     text-align: left; font-size: 11px; font-weight: 700; color: {GRAY_TEXT};
     background: #f6f6f3; padding: 9px 12px; border-bottom: 1px solid {BORDER};
@@ -229,7 +279,7 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 .yc-table-wrap {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; }}
 .yc-table-wrap .head {{
     padding: 12px 18px; border-bottom: 1px solid #eeede9; display: flex; align-items: center;
-    font-size: 13px; font-weight: 700; color: #454a59;
+    font-size: 15px; font-weight: 700; color: #454a59;
 }}
 .yc-table-wrap .head span {{ margin-left: auto; font-size: 12px; font-weight: 400; color: {MUTED}; }}
 .yc-table-wrap .foot {{

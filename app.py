@@ -61,8 +61,7 @@ if not _check_password():
 
 # --- サイドバー: ロゴ・クライアント切替・ナビ ---
 with st.sidebar:
-    T.sidebar_logo()
-
+    # サービス名はヘッダーに出しているので、サイドバーは企業選択から始める
     clients = storage.list_clients()
     st.markdown('<div class="yc-side-label">クライアント企業</div>', unsafe_allow_html=True)
     client = st.selectbox("クライアント企業", clients, label_visibility="collapsed") if clients else None

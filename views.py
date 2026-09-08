@@ -76,11 +76,11 @@ NAV_ITEMS = [NAV_MASTERS, NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_RULES]
 
 
 def setup_status(client: str) -> list[tuple[str, int]]:
-    """事前登録（補助科目・勘定科目・摘要辞書）の登録件数。"""
+    """事前登録の登録件数。名前は弥生から出力するPDFのファイル名に合わせる。"""
     return [
-        ("補助科目", len(storage.list_subaccounts(client))),
-        ("勘定科目", len(storage.list_account_master(client))),
-        ("摘要辞書", len(storage.list_desc_dict(client))),
+        ("補助科目一覧", len(storage.list_subaccounts(client))),
+        ("科目一覧表", len(storage.list_account_master(client))),
+        ("摘要科目一覧", len(storage.list_desc_dict(client))),
     ]
 
 
@@ -291,7 +291,12 @@ def _doc_type_hint(document_type: str) -> str:
 def _log_add(name: str, doc_type: str, detail: str, kind: str, status: str) -> None:
     st.session_state.setdefault("import_log", [])
     st.session_state["import_log"].insert(
-        0, {"name": name, "doc_type": doc_type, "detail": detail, "kind": kind, "status": status}
+        0,
+        {
+            "name": name, "doc_type": doc_type, "detail": detail,
+            "kind": kind, "status": status,
+            "at": datetime.now().strftime("%m/%d %H:%M"),
+        },
     )
 
 
@@ -302,7 +307,8 @@ def _render_import_log(slot) -> None:
         rows.append(
             f'<div class="row {"skip" if item["kind"] == "muted" else ""}">'
             f'<span>📄</span>'
-            f'<div class="name">{html.escape(item["name"])}</div>'
+            f'<div class="name">{html.escape(item["name"])}'
+            f'<span class="at">{html.escape(item.get("at", ""))}</span></div>'
             f'<div class="detail">{html.escape(item["doc_type"])}'
             f'{(" ・ " + html.escape(item["detail"])) if item["detail"] else ""}</div>'
             f'{T.pill(item["status"], item["kind"])}</div>'
@@ -339,7 +345,7 @@ def render_import(client: str) -> None:
         st.info(
             f"**「{client}」の事前登録:** {_status}\n\n"
             "科目・補助科目・摘要は会社ごとに違うため、先に「事前登録」で弥生のPDF"
-            "（補助科目一覧・勘定科目一覧・摘要科目一覧）を登録すると、その会社専用の振り分けになり"
+            "（補助科目一覧.pdf・科目一覧表.pdf・摘要科目一覧.pdf）を登録すると、その会社専用の振り分けになり"
             "精度が上がります（未登録でも取り込みはできます）。"
         )
 
@@ -404,7 +410,7 @@ def render_import(client: str) -> None:
         st.markdown(
             """
             1. **最初に「事前登録」を済ませます**（企業ごとに1回だけ）。弥生会計から
-               **補助科目一覧・勘定科目一覧・摘要科目一覧** の3つをPDF出力し、左メニューの「事前登録」で登録します。
+               **補助科目一覧.pdf・科目一覧表.pdf・摘要科目一覧.pdf** の3つをPDF出力し、左メニューの「事前登録」で登録します。
                科目・補助科目・摘要は会計事務所・お客様ごとに違うため、これでその会社専用の振り分けになります
             2. **書類タイプを選ぶ**（領収書／レシート・通帳・カード明細・給与台帳・売上・請求書・買掛表）
             3. **ファイルをアップロード**して **「変換を開始」** をクリック（読み取りに数十秒かかることがあります）
@@ -446,9 +452,10 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
             continue
         with st.expander(f"📄 {f.name}", expanded=False):
             try:
-                result, preview, new_partners, detail = _parse_uploaded_file(
-                    client, f, document_type, bank_sub, learned_expense, learned_income
-                )
+                with st.spinner(f"「{f.name}」を読み込み中..."):
+                    result, preview, new_partners, detail = _parse_uploaded_file(
+                        client, f, document_type, bank_sub, learned_expense, learned_income
+                    )
                 if result is None:
                     _log_add(f.name, document_type, detail or "プレビューのみ", "muted", "未解析")
                 else:
@@ -477,7 +484,8 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
                             st.caption(f"📝 学習済みの摘要ルールを {_replaced} 件に適用しました。")
                     for w in result.warnings:
                         st.warning(w)
-                    added = storage.add_entries(client, result.entries, source_file=f.name)
+                    with st.spinner("仕訳を登録中..."):
+                        added = storage.add_entries(client, result.entries, source_file=f.name)
                     added_total += added
                     review = result.needs_review_count
                     if added:
@@ -499,10 +507,11 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
 
     if added_total:
         bump_ledger()  # 新しい台帳内容でエディタを作り直す
-        st.success(
-            f"合計 {added_total} 件の仕訳を「{client}」の台帳に追加しました。"
-            "「仕訳の編集」で確認・修正してください。"
-        )
+        st.success(f"合計 {added_total} 件の仕訳を「{client}」の台帳に追加しました。")
+        # そのまま確認に進めるよう、仕訳の編集へのボタンを出す
+        if st.button("✏️ 仕訳の編集へ進む", type="primary", key="go_ledger"):
+            st.session_state["nav"] = NAV_LEDGER
+            st.rerun()
 
 
 def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, learned_income):
@@ -875,13 +884,18 @@ def render_ledger(client: str) -> None:
     # --- ファイル単位の取り消し ---
     with st.expander("🗂 ファイル単位で取り込みを取り消す"):
         st.caption("書類タイプの選び間違いなどで取り込んだ仕訳を、ファイルごとまとめて削除します。")
-        source_files = storage.list_source_files(client)
+        source_files = storage.list_source_files_detail(client)
         if not source_files:
             st.caption("ファイル由来の仕訳はありません。")
         else:
-            options = [f"{name}（{count}件）" for name, count in source_files]
+            # 取り込んだ日時も一緒に出す（同じ書類を入れ直したときの目印になる）
+            options = [
+                f"{r['name']}（{r['count']}件）"
+                + (f" ・ {str(r['imported_at'])[:16]} 取込" if r["imported_at"] else "")
+                for r in source_files
+            ]
             selected = st.selectbox("取り消すファイル", options, key="undo_file_select")
-            selected_name = source_files[options.index(selected)][0]
+            selected_name = source_files[options.index(selected)]["name"]
             confirm_undo = st.checkbox(f"「{selected_name}」由来の仕訳をすべて削除する", key="undo_file_confirm")
             if st.button("取り込みを取り消す", disabled=not confirm_undo, key="undo_file_btn"):
                 deleted = storage.delete_entries_by_source(client, selected_name)
@@ -1003,6 +1017,75 @@ def render_export(client: str) -> None:
 # =====================================================================
 
 
+# 事前登録の3つのマスタ。label は弥生から出力するPDFのファイル名に合わせている
+_MASTER_KINDS = {
+    "subaccounts": {"label": "補助科目一覧", "unit": "補助科目"},
+    "accounts": {"label": "科目一覧表", "unit": "勘定科目"},
+    "desc_dict": {"label": "摘要科目一覧", "unit": "摘要"},
+}
+
+
+def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, save_fn) -> None:
+    """事前登録カードの中身（登録済みの表示／PDFのアップロードと登録）。
+
+    登録済みなら「登録済み・ファイル名・日時」と、削除して登録し直すボタンを
+    出す。未登録ならPDFのアップロード欄を出し、読み取り・登録の間は
+    スピナーで進行中であることを示す。
+    """
+    info = _MASTER_KINDS[kind]
+    meta = storage.get_master_meta(client, kind)
+    if count:
+        st.markdown(
+            T.pill(f"✅ 登録済み {count}件", "ok")
+            + (
+                f'<div class="yc-registered">📄 {html.escape(meta["file_name"])}'
+                f'<br><span>{html.escape(meta["registered_at"])} に登録</span></div>'
+                if meta and meta["file_name"]
+                else '<div class="yc-registered"><span>登録元のファイルは記録されていません</span></div>'
+            ),
+            unsafe_allow_html=True,
+        )
+        if st.button("🗑 削除して登録し直す", key=f"reset_{kind}", use_container_width=True):
+            save_fn(client, [])
+            storage.clear_master_meta(client, kind)
+            st.session_state["sub_flash"] = (
+                f"「{info['label']}」の登録を削除しました。新しいPDFをアップロードしてください。"
+            )
+            st.rerun()
+        return
+
+    with st.expander("📖 手順"):
+        st.markdown(steps_md)
+    uploaded = st.file_uploader(
+        f"{info['label']}のPDF", type=["pdf"], key=f"{kind}_pdf", label_visibility="collapsed",
+    )
+    if uploaded is None:
+        return
+    with st.spinner(f"「{uploaded.name}」を読み込み中..."):
+        try:
+            records = parse_fn(uploaded.getvalue())
+        except Exception as e:
+            records = []
+            st.error(f"PDFの読み取りに失敗しました: {e}")
+    if not records:
+        st.error(
+            f"{info['unit']}を読み取れませんでした。"
+            f"弥生の「{info['label']}」のPDFかどうか確認してください。"
+        )
+        return
+    st.success(f"✅ {len(records)} 件の{info['unit']}を読み取りました。内容を確認してください:")
+    summary_fn(records)
+    if st.button(f"この {len(records)} 件を登録する", type="primary", key=f"{kind}_import",
+                 use_container_width=True):
+        with st.spinner("登録中..."):
+            saved = save_fn(client, records)
+            storage.set_master_meta(client, kind, uploaded.name)
+        st.session_state["sub_flash"] = (
+            f"✅ 「{uploaded.name}」から {saved} 件の{info['unit']}を登録しました。"
+        )
+        st.rerun()
+
+
 def render_masters(client: str) -> None:
     _master = storage.list_subaccounts(client)
     _acct_master = storage.list_account_master(client)
@@ -1026,20 +1109,20 @@ def render_masters(client: str) -> None:
     col_sub_master, col_acct_master, col_dict = st.columns(3)
     with col_sub_master, st.container(border=True):
         T.card_title(
-            f"🗂 事前登録①：補助科目マスタ（{len(_master)} 件登録済み）" if _master else "🗂 事前登録①：補助科目マスタ（未登録）",
-            "通帳の摘要や売掛表・請求書の取引先から、勘定科目・補助科目を自動で振り分けるための登録",
+            "🗂 事前登録①：補助科目一覧",
+            "弥生の「補助科目一覧.pdf」を登録します。通帳の摘要や売掛表・請求書の取引先から、補助科目を自動で振り分けます",
         )
         box_sub_pdf = st.container()
     with col_acct_master, st.container(border=True):
         T.card_title(
-            f"📒 事前登録②：勘定科目マスタ（{len(_acct_master)} 件登録済み）" if _acct_master else "📒 事前登録②：勘定科目マスタ（未登録）",
-            "仕訳表の科目をプルダウンで選べるようになり、売上・買掛表の既定の科目もここから決まります",
+            "📒 事前登録②：科目一覧表",
+            "弥生の「科目一覧表.pdf」を登録します。仕訳表の科目をプルダウンで選べるようになります",
         )
         box_acct_pdf = st.container()
     with col_dict, st.container(border=True):
         T.card_title(
-            f"📚 事前登録③：摘要辞書（{len(_desc_dict)} 件登録済み）" if _desc_dict else "📚 事前登録③：摘要辞書（未登録）",
-            "書類の内容に辞書の語（駐車料・タクシー代 など）があれば、その会社の流儀の摘要と科目が最初から入ります",
+            "📚 事前登録③：摘要科目一覧",
+            "弥生の「摘要科目一覧.pdf」を登録します。書類の内容に辞書の語があれば、その会社の流儀の摘要と科目が入ります",
         )
         box_dict_pdf = st.container()
 
@@ -1057,40 +1140,27 @@ def render_masters(client: str) -> None:
         )
         tab_doctype, tab_rowmap = st.tabs(["🔗 書類タイプの紐付け", "🔢 売掛・買掛の行番号"])
 
-    # --- 摘要辞書: PDFから一括登録 ---
+    # --- 摘要辞書（摘要科目一覧）: PDFから一括登録 ---
+    def _dict_summary(records: list[dict]) -> None:
+        st.dataframe(
+            pd.DataFrame(records)
+            .groupby("account", sort=False)
+            .agg(件数=("description", "count"),
+                 摘要の例=("description", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
+            .rename_axis("勘定科目"),
+            use_container_width=True, height=240,
+        )
+
     with box_dict_pdf:
-        with st.expander("📖 手順"):
-            st.markdown(
-                """
-                1. 弥生会計で「摘要辞書（摘要科目一覧）」を **PDF出力** します
-                2. そのPDFを下にアップロードします
-                3. 読み取り結果を確認して「登録する」を押します
-                """
-            )
-        dict_pdf = st.file_uploader("摘要科目一覧のPDF", type=["pdf"], key="dict_pdf", label_visibility="collapsed")
-        if dict_pdf is not None:
-            try:
-                dict_records = parse_yayoi_desc_dict_pdf(dict_pdf.getvalue())
-            except Exception as e:
-                dict_records = []
-                st.error(f"PDFの読み取りに失敗しました: {e}")
-            if not dict_records:
-                st.error("摘要辞書を読み取れませんでした。弥生の「摘要科目一覧」のPDFかどうか確認してください。")
-            else:
-                st.success(f"✅ {len(dict_records)} 件の摘要を読み取りました。内容を確認してください:")
-                summary = (
-                    pd.DataFrame(dict_records)
-                    .groupby("account", sort=False)
-                    .agg(件数=("description", "count"), 摘要の例=("description", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
-                    .rename_axis("勘定科目")
-                )
-                st.dataframe(summary, use_container_width=True, height=300)
-                if _desc_dict:
-                    st.caption(f"※ 登録すると「{client}」の既存の摘要辞書（{len(_desc_dict)}件）は置き換えられます。")
-                if st.button(f"この {len(dict_records)} 件を登録する", type="primary", key="dict_import"):
-                    saved = storage.replace_desc_dict(client, dict_records)
-                    st.session_state["sub_flash"] = f"✅ {saved} 件の摘要辞書を登録しました。"
-                    st.rerun()
+        _render_master_pdf_box(
+            client, "desc_dict", len(_desc_dict),
+            """
+            1. 弥生会計で「摘要科目一覧」を **PDF出力** します
+            2. その **摘要科目一覧.pdf** を下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+            """,
+            parse_yayoi_desc_dict_pdf, _dict_summary, storage.replace_desc_dict,
+        )
 
     # --- 摘要辞書: 確認・編集 ---
     with tab_dict_list:
@@ -1118,40 +1188,27 @@ def render_masters(client: str) -> None:
             st.session_state["sub_flash"] = f"✅ {saved} 件の摘要辞書を保存しました。"
             st.rerun()
 
-    # --- 補助科目: PDFから一括登録 ---
+    # --- 補助科目一覧: PDFから一括登録 ---
+    def _sub_summary(records: list[dict]) -> None:
+        st.dataframe(
+            pd.DataFrame(records)
+            .groupby("account", sort=False)
+            .agg(件数=("sub_name", "count"),
+                 補助科目の例=("sub_name", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
+            .rename_axis("勘定科目"),
+            use_container_width=True, height=240,
+        )
+
     with box_sub_pdf:
-        with st.expander("📖 手順"):
-            st.markdown(
-                """
-                1. 弥生会計で［集計表］→［補助科目一覧表］を **PDF出力** します
-                2. そのPDFを下にアップロードします
-                3. 読み取り結果を確認して「登録する」を押します
-                """
-            )
-        sub_pdf = st.file_uploader("補助科目一覧表のPDF", type=["pdf"], key="sub_pdf", label_visibility="collapsed")
-        if sub_pdf is not None:
-            try:
-                pdf_records = parse_yayoi_subaccount_pdf(sub_pdf.getvalue())
-            except Exception as e:
-                pdf_records = []
-                st.error(f"PDFの読み取りに失敗しました: {e}")
-            if not pdf_records:
-                st.error("補助科目を読み取れませんでした。弥生の「補助科目一覧表」のPDFかどうか確認してください。")
-            else:
-                st.success(f"✅ {len(pdf_records)} 件の補助科目を読み取りました。内容を確認してください:")
-                summary = (
-                    pd.DataFrame(pdf_records)
-                    .groupby("account", sort=False)
-                    .agg(件数=("sub_name", "count"), 補助科目の例=("sub_name", lambda s: "、".join(s.head(3)) + ("…" if len(s) > 3 else "")))
-                    .rename_axis("勘定科目")
-                )
-                st.dataframe(summary, use_container_width=True)
-                if _master:
-                    st.caption(f"※ 登録すると「{client}」の既存のマスタ（{len(_master)}件）は置き換えられます。")
-                if st.button(f"この {len(pdf_records)} 件を登録する", type="primary", key="sub_import"):
-                    saved = storage.replace_subaccounts(client, pdf_records)
-                    st.session_state["sub_flash"] = f"✅ {saved} 件の補助科目を登録しました。"
-                    st.rerun()
+        _render_master_pdf_box(
+            client, "subaccounts", len(_master),
+            """
+            1. 弥生会計で［集計表］→［補助科目一覧表］を **PDF出力** します
+            2. その **補助科目一覧.pdf** を下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+            """,
+            parse_yayoi_subaccount_pdf, _sub_summary, storage.replace_subaccounts,
+        )
 
     # --- 補助科目: 確認・編集 ---
     with tab_master_list:
@@ -1192,41 +1249,27 @@ def render_masters(client: str) -> None:
             st.session_state["sub_flash"] = f"✅ {saved} 件を保存しました。"
             st.rerun()
 
-    # --- 勘定科目: PDFから一括登録 ---
-    with box_acct_pdf:
-        with st.expander("📖 手順"):
-            st.markdown(
-                """
-                1. 弥生会計で「勘定科目一覧表」を **PDF出力** します（科目設定の印刷）
-                2. そのPDFを下にアップロードします
-                3. 読み取り結果を確認して「登録する」を押します
+    # --- 科目一覧表（勘定科目）: PDFから一括登録 ---
+    def _acct_summary(records: list[dict]) -> None:
+        st.dataframe(
+            pd.DataFrame(records).rename(
+                columns={"name": "勘定科目", "search_key": "サーチキー", "side": "貸借", "tax_class": "税区分"}
+            ),
+            use_container_width=True, height=240,
+        )
 
-                登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
-                """
-            )
-        acct_pdf = st.file_uploader("勘定科目一覧表のPDF", type=["pdf"], key="acct_pdf", label_visibility="collapsed")
-        if acct_pdf is not None:
-            try:
-                acct_records = parse_yayoi_account_pdf(acct_pdf.getvalue())
-            except Exception as e:
-                acct_records = []
-                st.error(f"PDFの読み取りに失敗しました: {e}")
-            if not acct_records:
-                st.error("勘定科目を読み取れませんでした。弥生の「勘定科目一覧表」のPDFかどうか確認してください。")
-            else:
-                st.success(f"✅ {len(acct_records)} 件の勘定科目を読み取りました。内容を確認してください:")
-                st.dataframe(
-                    pd.DataFrame(acct_records).rename(
-                        columns={"name": "勘定科目", "search_key": "サーチキー", "side": "貸借", "tax_class": "税区分"}
-                    ),
-                    use_container_width=True, height=300,
-                )
-                if _acct_master:
-                    st.caption(f"※ 登録すると「{client}」の既存の勘定科目マスタ（{len(_acct_master)}件）は置き換えられます。")
-                if st.button(f"この {len(acct_records)} 件を登録する", type="primary", key="acct_import"):
-                    saved = storage.replace_account_master(client, acct_records)
-                    st.session_state["sub_flash"] = f"✅ {saved} 件の勘定科目を登録しました。"
-                    st.rerun()
+    with box_acct_pdf:
+        _render_master_pdf_box(
+            client, "accounts", len(_acct_master),
+            """
+            1. 弥生会計で「科目一覧表」を **PDF出力** します（科目設定の印刷）
+            2. その **科目一覧表.pdf** を下にアップロードします
+            3. 読み取り結果を確認して「登録する」を押します
+
+            登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
+            """,
+            parse_yayoi_account_pdf, _acct_summary, storage.replace_account_master,
+        )
 
     # --- 勘定科目: 確認・編集 ---
     with tab_acct_list:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -144,6 +145,20 @@ CREATE TABLE IF NOT EXISTS desc_dict (
 )
 """
 
+# 事前登録の登録元ファイル（どのPDFをいつ登録したか）。画面で
+# 「登録済み・ファイル名・日時」を出し、差し替えの判断に使う。
+# kind: subaccounts / accounts / desc_dict
+_CREATE_MASTER_META_SQL = """
+CREATE TABLE IF NOT EXISTS master_meta (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    file_name TEXT NOT NULL DEFAULT '',
+    registered_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, kind)
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -255,6 +270,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_DOCTYPE_RULES_SQL)
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
     conn.execute(_CREATE_DESC_DICT_SQL)
+    conn.execute(_CREATE_MASTER_META_SQL)
     # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
@@ -444,6 +460,78 @@ def list_source_files(client: str, db_path: Path = DB_PATH) -> list[tuple[str, i
             (client,),
         ).fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+def list_source_files_detail(client: str, db_path: Path = DB_PATH) -> list[dict]:
+    """出典ファイル名・件数・取り込み日時を返す（新しい順）。"""
+    if _supabase_enabled(db_path):
+        res = (
+            _sb().table("entries").select("source_file,created_at")
+            .eq("client", client).neq("source_file", "").order("id", desc=True).execute()
+        )
+        agg: dict[str, dict] = {}
+        for r in res.data:
+            item = agg.setdefault(
+                r["source_file"],
+                {"name": r["source_file"], "count": 0, "imported_at": r.get("created_at", "")},
+            )
+            item["count"] += 1
+        return list(agg.values())
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT source_file, COUNT(*), MAX(created_at) FROM entries
+               WHERE client = ? AND source_file != ''
+               GROUP BY source_file ORDER BY MAX(id) DESC""",
+            (client,),
+        ).fetchall()
+    return [{"name": r[0], "count": r[1], "imported_at": r[2] or ""} for r in rows]
+
+
+def get_master_meta(client: str, kind: str, db_path: Path = DB_PATH) -> dict | None:
+    """事前登録の登録元ファイル情報（ファイル名・登録日時）を返す。"""
+    if _supabase_enabled(db_path):
+        rows = (
+            _sb().table("master_meta").select("*")
+            .eq("client", client).eq("kind", kind).execute().data
+        )
+        return (
+            {"file_name": rows[0]["file_name"], "registered_at": rows[0]["registered_at"]}
+            if rows else None
+        )
+    with _connect(db_path) as conn:
+        r = conn.execute(
+            "SELECT file_name, registered_at FROM master_meta WHERE client = ? AND kind = ?",
+            (client, kind),
+        ).fetchone()
+    return {"file_name": r[0], "registered_at": r[1]} if r else None
+
+
+def set_master_meta(client: str, kind: str, file_name: str, db_path: Path = DB_PATH) -> None:
+    """事前登録の登録元ファイル情報を記録する（同じ種類は上書き）。"""
+    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+    if _supabase_enabled(db_path):
+        _sb().table("master_meta").upsert(
+            {"client": client, "kind": kind, "file_name": file_name, "registered_at": now},
+            on_conflict="client,kind",
+        ).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO master_meta (client, kind, file_name, registered_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT (client, kind) DO UPDATE SET
+                 file_name = excluded.file_name, registered_at = excluded.registered_at""",
+            (client, kind, file_name, now),
+        )
+
+
+def clear_master_meta(client: str, kind: str, db_path: Path = DB_PATH) -> None:
+    """事前登録の登録元ファイル情報を削除する（マスタを空にするときに使う）。"""
+    if _supabase_enabled(db_path):
+        _sb().table("master_meta").delete().eq("client", client).eq("kind", kind).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM master_meta WHERE client = ? AND kind = ?", (client, kind))
 
 
 def delete_entries_by_source(client: str, source_file: str, db_path: Path = DB_PATH) -> int:
