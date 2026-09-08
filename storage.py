@@ -285,15 +285,12 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     if "note" not in existing_cols:
         conn.execute("ALTER TABLE entries ADD COLUMN note TEXT NOT NULL DEFAULT ''")
         conn.commit()
-    # 見本として入れていた既定の企業（A建設・B工務店・C社）を片付ける。
-    # 仕訳が1件も入っていないものだけ消すので、実際に使い始めた企業は残る
-    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
-        conn.executemany(
-            """DELETE FROM clients WHERE name = ?
-               AND NOT EXISTS (SELECT 1 FROM entries WHERE entries.client = clients.name)""",
-            [(name,) for name in _SAMPLE_CLIENTS],
-        )
-        conn.execute("PRAGMA user_version = 2")
+    # 見本として入れていた既定の企業（A建設・B工務店・C社）は、テスト用の
+    # ダミーなので仕訳ごと片付ける（本番のクライアントは画面から登録する）
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 3:
+        for name in _SAMPLE_CLIENTS:
+            _purge_client(conn, name)
+        conn.execute("PRAGMA user_version = 3")
         conn.commit()
     return conn
 
@@ -326,15 +323,29 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
     return True
 
 
+# 企業ごとに持っているデータ（企業を消すときはまとめて消す）
+_CLIENT_TABLES = (
+    "entries", "subaccounts", "account_master", "desc_dict",
+    "desc_rules", "doctype_rules", "partner_rows", "master_meta",
+)
+
+
+def _purge_client(conn: sqlite3.Connection, name: str) -> None:
+    """その企業のデータ（仕訳・各マスタ・学習した摘要ルール）を全部消す。"""
+    for table in _CLIENT_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE client = ?", (name,))
+    conn.execute("DELETE FROM clients WHERE name = ?", (name,))
+
+
 def delete_client(name: str, db_path: Path = DB_PATH) -> None:
-    """企業を削除する。その企業の仕訳もまとめて削除する。"""
+    """企業を削除する。仕訳・事前登録のマスタ・摘要ルールもまとめて削除する。"""
     if _supabase_enabled(db_path):
-        _sb().table("entries").delete().eq("client", name).execute()
+        for table in _CLIENT_TABLES:
+            _sb().table(table).delete().eq("client", name).execute()
         _sb().table("clients").delete().eq("name", name).execute()
         return
     with _connect(db_path) as conn:
-        conn.execute("DELETE FROM entries WHERE client = ?", (name,))
-        conn.execute("DELETE FROM clients WHERE name = ?", (name,))
+        _purge_client(conn, name)
 
 
 def add_entries(

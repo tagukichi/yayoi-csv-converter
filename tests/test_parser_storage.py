@@ -722,27 +722,50 @@ def test_storage_roundtrip():
 
 
 def test_sample_clients_cleaned_up():
-    """見本の企業（A建設など）は、仕訳がなければ起動時に片付ける。"""
+    """見本の企業（A建設など）は、仕訳ごと起動時に片付ける。"""
     import sqlite3
 
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "test.db"
-        # 使い始めた企業（仕訳あり）を先に作っておく
         storage.add_entries(
-            "B工務店",
+            "A建設",
             [JournalEntry(date=date(2026, 4, 1), debit_account="雑費",
                           credit_account="現金", amount=100)],
             db_path=db,
         )
-        # 旧バージョンの状態を再現（見本の企業が入っていて user_version=1）
+        storage.add_client("株式会社Kライフ", db_path=db)
+        # 旧バージョンの状態を再現（見本の企業が入っていて user_version が古い）
         with sqlite3.connect(db) as conn:
             conn.executemany(
                 "INSERT OR IGNORE INTO clients (name) VALUES (?)",
                 [("A建設",), ("B工務店",), ("C社",)],
             )
-            conn.execute("PRAGMA user_version = 1")
-        # 起動時の片付けで、空の A建設・C社 だけが消える
-        assert storage.list_clients(db_path=db) == ["B工務店"]
+            conn.execute("PRAGMA user_version = 2")
+        # 起動時に見本の企業だけが消え、自分で登録した企業は残る
+        assert storage.list_clients(db_path=db) == ["株式会社Kライフ"]
+        assert storage.load_entries("A建設", db_path=db).empty
+
+
+def test_delete_client_purges_masters():
+    """企業を削除すると、その企業のマスタや摘要ルールもまとめて消える。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        storage.add_client("D商事", db_path=db)
+        storage.replace_subaccounts(
+            "D商事", [{"account": "普通預金", "sub_name": "川崎信金", "search_key": ""}],
+            db_path=db,
+        )
+        storage.replace_account_master("D商事", [{"name": "現金"}], db_path=db)
+        storage.replace_desc_dict(
+            "D商事", [{"description": "駐車料", "account": "旅費交通費"}], db_path=db
+        )
+        storage.add_desc_rule("D商事", "セブン", "飲食代", db_path=db)
+
+        storage.delete_client("D商事", db_path=db)
+        assert storage.list_subaccounts("D商事", db_path=db) == []
+        assert storage.list_account_master("D商事", db_path=db) == []
+        assert storage.list_desc_dict("D商事", db_path=db) == []
+        assert storage.list_desc_rules("D商事", db_path=db) == []
 
 
 def test_note_is_saved():
