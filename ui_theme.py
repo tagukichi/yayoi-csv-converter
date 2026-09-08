@@ -45,7 +45,8 @@ _CSS = f"""
 <style>
 /* ---------- 全体 ---------- */
 .block-container {{
-    padding-top: 1.6rem;
+    /* 固定ヘッダーの下に十分な余白をとる（カードがヘッダーに接しないように） */
+    padding-top: 2.6rem;
     padding-bottom: 2rem;
     /* 表（仕訳・マスタ）が横スクロールしないよう、画面幅いっぱいまで使う */
     max-width: 1900px;
@@ -89,20 +90,28 @@ section[data-testid="stSidebar"] {{
     z-index: 1000000 !important; opacity: 1 !important; visibility: visible !important;
     display: block !important;
 }}
+/* 閉じるボタンは <div data-testid> の中に button、開くボタンは button 自身に
+   data-testid が付く。アイコンも SVG ではなく Material フォントの span なので、
+   どちらの形でも白くなるようまとめて指定する */
+[data-testid="stSidebarCollapseButton"],
 [data-testid="stSidebarCollapseButton"] button,
-[data-testid="stExpandSidebarButton"] button,
-[data-testid="stSidebarCollapseButton"] button *,
-[data-testid="stExpandSidebarButton"] button * {{
+[data-testid="stSidebarCollapseButton"] span,
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="stExpandSidebarButton"],
+[data-testid="stExpandSidebarButton"] span,
+[data-testid="stExpandSidebarButton"] svg {{
     color: #ffffff !important; fill: #ffffff !important;
     background: transparent !important; border: 0 !important;
-    min-height: 0 !important; padding: 6px !important;
+    min-height: 0 !important;
+}}
+[data-testid="stSidebarCollapseButton"] button,
+button[data-testid="stExpandSidebarButton"] {{
+    padding: 6px !important; border-radius: 8px !important;
 }}
 [data-testid="stSidebarCollapseButton"] button:hover,
-[data-testid="stExpandSidebarButton"] button:hover {{
-    background: rgba(255,255,255,0.12) !important;
+button[data-testid="stExpandSidebarButton"]:hover {{
+    background: rgba(255,255,255,0.14) !important;
 }}
-[data-testid="stSidebarCollapseButton"] svg,
-[data-testid="stExpandSidebarButton"] svg {{ fill: #ffffff !important; color: #ffffff !important; }}
 
 /* ---------- サイドバー ---------- */
 section[data-testid="stSidebar"] {{
@@ -215,12 +224,21 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
     font-size: 15px; font-weight: 700; color: #454a59; margin: 2px 0 6px 0;
 }}
 .yc-hint {{ font-size: 13px; color: {MUTED}; }}
-/* 事前登録カードの「登録済み」表示（ファイル名と登録日時） */
+/* 事前登録カードの「登録済み」表示。緑のパネルにして、登録済みかどうかが
+   ひと目で分かるようにする（.yc-registered は登録済みのときだけ描画される） */
 .yc-registered {{
-    margin-top: 10px; font-size: 14px; color: #20242e; line-height: 1.6;
-    word-break: break-all;
+    margin-top: 10px; padding: 12px 14px 12px 16px; border-radius: 8px;
+    background: #e6f5ed; border: 1px solid #7ec5a4; box-shadow: inset 4px 0 0 {GREEN};
+    font-size: 14px; color: #20242e; line-height: 1.7; word-break: break-all;
 }}
-.yc-registered span {{ font-size: 12.5px; color: {GRAY_TEXT}; }}
+.yc-registered .done {{
+    display: block; font-weight: 700; color: {GREEN}; font-size: 14px; margin-bottom: 2px;
+}}
+.yc-registered .when {{ font-size: 12.5px; color: {GRAY_TEXT}; }}
+/* カード全体もうっすら緑にして、未登録のカードと見分けやすくする */
+[data-testid="stVerticalBlock"]:has(.yc-registered) {{
+    background: #f4faf7 !important; border-radius: 10px;
+}}
 
 /* ---------- ピル・バッジ ---------- */
 .yc-pill {{
