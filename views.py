@@ -78,8 +78,8 @@ NAV_ITEMS = [NAV_MASTERS, NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_RULES]
 def setup_status(client: str) -> list[tuple[str, int]]:
     """事前登録の登録件数。名前は弥生から出力するPDFのファイル名に合わせる。"""
     return [
-        ("補助科目一覧", len(storage.list_subaccounts(client))),
         ("科目一覧表", len(storage.list_account_master(client))),
+        ("補助科目一覧", len(storage.list_subaccounts(client))),
         ("摘要科目一覧", len(storage.list_desc_dict(client))),
     ]
 
@@ -248,7 +248,7 @@ def persist_pending_edits(target_client: str) -> bool:
             "取引日付": datetime.now().strftime("%Y/%m/%d"),
             "借方勘定科目": "", "借方補助科目": "", "借方税区分": "対象外",
             "貸方勘定科目": "", "貸方補助科目": "", "貸方税区分": "対象外",
-            "金額": 0, "摘要": "", "要確認": True, "出典ファイル": "",
+            "金額": 0, "摘要": "", "要確認": True, "備考": "", "出典ファイル": "",
         }
         base.update({k: v for k, v in row.items() if k in base})
         full = pd.concat([full, pd.DataFrame([base])], ignore_index=True)
@@ -345,7 +345,7 @@ def render_import(client: str) -> None:
         st.info(
             f"**「{client}」の事前登録:** {_status}\n\n"
             "科目・補助科目・摘要は会社ごとに違うため、先に「事前登録」で弥生のPDF"
-            "（補助科目一覧.pdf・科目一覧表.pdf・摘要科目一覧.pdf）を登録すると、その会社専用の振り分けになり"
+            "（科目一覧表.pdf・補助科目一覧.pdf・摘要科目一覧.pdf）を登録すると、その会社専用の振り分けになり"
             "精度が上がります（未登録でも取り込みはできます）。"
         )
 
@@ -410,7 +410,7 @@ def render_import(client: str) -> None:
         st.markdown(
             """
             1. **最初に「事前登録」を済ませます**（企業ごとに1回だけ）。弥生会計から
-               **補助科目一覧.pdf・科目一覧表.pdf・摘要科目一覧.pdf** の3つをPDF出力し、左メニューの「事前登録」で登録します。
+               **科目一覧表.pdf・補助科目一覧.pdf・摘要科目一覧.pdf** の3つをPDF出力し、左メニューの「事前登録」で登録します。
                科目・補助科目・摘要は会計事務所・お客様ごとに違うため、これでその会社専用の振り分けになります
             2. **書類タイプを選ぶ**（領収書／レシート・通帳・カード明細・給与台帳・売上・請求書・買掛表）
             3. **ファイルをアップロード**して **「変換を開始」** をクリック（読み取りに数十秒かかることがあります）
@@ -742,6 +742,10 @@ def render_ledger(client: str) -> None:
             "摘要": st.column_config.TextColumn(width="large"),
             "要確認": st.column_config.CheckboxColumn(
                 help="確認が済んだらチェックを外す", width="small"
+            ),
+            "備考": st.column_config.TextColumn(
+                disabled=True, width="small",
+                help="読み取り時のメモ（日付を仮置きした行、残高が合わない行など）。CSVには出ません",
             ),
             "出典ファイル": st.column_config.TextColumn(disabled=True, width="small"),
         },
@@ -1106,19 +1110,20 @@ def render_masters(client: str) -> None:
 
     # 上段は3つのカードでPDF登録だけを並べ、表（確認・編集）は下に全幅で置く。
     # 表を3カラムに入れると狭くて編集しづらいため。
-    col_sub_master, col_acct_master, col_dict = st.columns(3)
-    with col_sub_master, st.container(border=True, key="yccard3"):
-        T.card_title(
-            "事前登録①：補助科目一覧",
-            "弥生の「補助科目一覧.pdf」を登録します。通帳の摘要や売掛表・請求書の取引先から、補助科目を自動で振り分けます",
-        )
-        box_sub_pdf = st.container()
+    # 科目一覧表があっての補助科目一覧なので、①科目 → ②補助科目 の順に並べる
+    col_acct_master, col_sub_master, col_dict = st.columns(3)
     with col_acct_master, st.container(border=True, key="yccard4"):
         T.card_title(
-            "事前登録②：科目一覧表",
+            "事前登録①：科目一覧表",
             "弥生の「科目一覧表.pdf」を登録します。仕訳表の科目をプルダウンで選べるようになります",
         )
         box_acct_pdf = st.container()
+    with col_sub_master, st.container(border=True, key="yccard3"):
+        T.card_title(
+            "事前登録②：補助科目一覧",
+            "弥生の「補助科目一覧.pdf」を登録します。通帳の摘要や売掛表・請求書の取引先から、補助科目を自動で振り分けます",
+        )
+        box_sub_pdf = st.container()
     with col_dict, st.container(border=True, key="yccard5"):
         T.card_title(
             "事前登録③：摘要科目一覧",
@@ -1129,8 +1134,8 @@ def render_masters(client: str) -> None:
     # 登録内容の確認・編集（全幅・タブで切り替え）
     with st.container(border=True, key="yccard6"):
         T.card_title("登録内容の確認・編集","表を直接編集して「変更を保存」を押すと、登録内容を書き換えられます")
-        tab_master_list, tab_acct_list, tab_dict_list = st.tabs(
-            ["補助科目","勘定科目","摘要辞書"]
+        tab_acct_list, tab_master_list, tab_dict_list = st.tabs(
+            ["勘定科目", "補助科目", "摘要辞書"]
         )
 
     with st.container(border=True, key="yccard7"):
