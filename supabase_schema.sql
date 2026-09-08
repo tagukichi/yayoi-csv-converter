@@ -115,3 +115,14 @@ create table if not exists desc_dict (
   created_at timestamptz not null default now(),
   unique (client, description, account)
 );
+
+-- 事前登録の登録元ファイル（どのPDFをいつ登録したか）
+-- kind: subaccounts / accounts / desc_dict
+create table if not exists master_meta (
+  id bigint generated always as identity primary key,
+  client text not null,
+  kind text not null,
+  file_name text not null default '',
+  registered_at text not null default '',
+  unique (client, kind)
+);
