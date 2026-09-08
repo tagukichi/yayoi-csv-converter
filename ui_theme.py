@@ -54,9 +54,12 @@ _CSS = f"""
 }}
 h1, h2, h3 {{ letter-spacing: 0.01em; }}
 /* ---------- ヘッダー（サイドバーと同じ紺。左端にサイドバーの表示切替） ---------- */
+/* position: absolute だと親（サイドバーの右）が基準になり、サイドバーの上が
+   塗られずに白く残る。fixed にして画面の左端から全幅で敷く */
 header[data-testid="stHeader"] {{
-    background: {NAVY};
-    left: 0 !important; width: 100% !important;
+    background: {NAVY} !important;
+    position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important;
+    width: 100vw !important;
     height: {HEADER_H}; min-height: {HEADER_H};
     border-bottom: 1px solid rgba(255,255,255,0.10);
     z-index: 999999;
@@ -67,13 +70,16 @@ header[data-testid="stHeader"]::after {{
     color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.02em;
     /* 常に左端（開閉ボタンの右）に置く。order/margin-right で他の要素を右へ寄せ、
        flex: 0 0 auto と nowrap で折り返さないようにする */
-    order: -1; margin-left: 60px; margin-right: auto;
+    order: -1; margin-left: 76px; margin-right: auto;
     flex: 0 0 auto; white-space: nowrap;
 }}
-/* サイドバーはヘッダーの下から始める */
+/* サイドバーはヘッダーの下から始める。z-index をヘッダーより上にするのは、
+   サイドバー内にある開閉ボタンをヘッダーの上に重ねて見せるため
+   （サイドバー本体は y=56px 以降なのでヘッダーとは重ならない） */
 section[data-testid="stSidebar"] {{
     top: {HEADER_H} !important;
     height: calc(100vh - {HEADER_H}) !important;
+    z-index: 1000001 !important;
 }}
 /* サイドバーの開閉ボタンをヘッダーの左端に固定して常に表示する
    （既定はサイドバーの上にあり、マウスを乗せるまで見えない） */
@@ -84,8 +90,11 @@ section[data-testid="stSidebar"] {{
     display: block !important;
 }}
 [data-testid="stSidebarCollapseButton"] button,
-[data-testid="stExpandSidebarButton"] button {{
-    color: #ffffff !important; background: transparent !important; border: 0 !important;
+[data-testid="stExpandSidebarButton"] button,
+[data-testid="stSidebarCollapseButton"] button *,
+[data-testid="stExpandSidebarButton"] button * {{
+    color: #ffffff !important; fill: #ffffff !important;
+    background: transparent !important; border: 0 !important;
     min-height: 0 !important; padding: 6px !important;
 }}
 [data-testid="stSidebarCollapseButton"] button:hover,
