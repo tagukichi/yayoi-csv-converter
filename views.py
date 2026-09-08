@@ -306,7 +306,6 @@ def _render_import_log(slot) -> None:
     for item in log[:12]:
         rows.append(
             f'<div class="row {"skip" if item["kind"] == "muted" else ""}">'
-            f'<span>📄</span>'
             f'<div class="name">{html.escape(item["name"])}'
             f'<span class="at">{html.escape(item.get("at", ""))}</span></div>'
             f'<div class="detail">{html.escape(item["doc_type"])}'
@@ -340,7 +339,8 @@ def render_import(client: str) -> None:
     _setup_items = setup_status(client)
     if any(count == 0 for _name, count in _setup_items):
         _status = " ／ ".join(
-            f"{name} ✅ {count}件" if count else f"{name} ⬜ 未登録" for name, count in _setup_items
+            f"{name} 登録済み（{count}件）" if count else f"{name} 未登録"
+            for name, count in _setup_items
         )
         st.info(
             f"**「{client}」の事前登録:** {_status}\n\n"
@@ -350,7 +350,7 @@ def render_import(client: str) -> None:
         )
 
     # --- 1. 書類タイプ ---
-    with st.container(border=True):
+    with st.container(border=True, key="yccard1"):
         T.card_title("1. 書類タイプを選ぶ")
         document_type = st.pills(
             "書類タイプ", DOC_TYPES, default="領収書", key="doc_type_pill",
@@ -370,7 +370,7 @@ def render_import(client: str) -> None:
                 if _bank_choice != "（指定なし）":
                     bank_sub = _bank_choice
             else:
-                st.caption("💡 「事前登録」で普通預金の補助科目（銀行名）を登録すると、ここで口座を選べます。")
+                st.caption("「事前登録」で普通預金の補助科目（銀行名）を登録すると、ここで口座を選べます。")
 
     # --- 2. アップロード ---
     # 買掛表はExcelでもらう運用のため、アップロードもExcel（xlsx/CSV）に限定する
@@ -381,7 +381,7 @@ def render_import(client: str) -> None:
         upload_types = ["pdf", "png", "jpg", "jpeg", "xlsx", "csv"]
         T.set_upload_note("PDF / PNG / JPG / XLSX / CSV ・ 複数選択可 ・ スマホ写真は自動で圧縮されます")
 
-    with st.container(border=True):
+    with st.container(border=True, key="yccard2"):
         T.card_title("2. ファイルをアップロードして変換")
         uploaded_files = st.file_uploader(
             "ファイルをアップロード（複数選択できます）",
@@ -406,7 +406,7 @@ def render_import(client: str) -> None:
 
     _render_import_log(log_slot)
 
-    with st.expander("📖 使い方"):
+    with st.expander("使い方"):
         st.markdown(
             """
             1. **最初に「事前登録」を済ませます**（企業ごとに1回だけ）。弥生会計から
@@ -435,7 +435,7 @@ def render_import(client: str) -> None:
 def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok) -> None:
     # 表の編集が「変更を保存」前でも消えないよう、先に自動保存する
     if persist_pending_edits(client):
-        st.info("💾 仕訳表の未保存の編集を自動保存してから取り込みます。")
+        st.info("仕訳表の未保存の編集を自動保存してから取り込みます。")
     progress = st.progress(0.0)
     added_total = 0
     # 一括置換から学習したルール（組み込みルールより優先して科目を決める）
@@ -450,7 +450,7 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
             _log_add(f.name, document_type, "取り込み済みのためスキップ", "muted", "スキップ")
             progress.progress((i + 1) / len(uploaded_files))
             continue
-        with st.expander(f"📄 {f.name}", expanded=False):
+        with st.expander(f.name, expanded=False):
             try:
                 with st.spinner(f"「{f.name}」を読み込み中..."):
                     result, preview, new_partners, detail = _parse_uploaded_file(
@@ -475,13 +475,13 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
                     if _dict:
                         _dict_applied = apply_desc_dictionary(result.entries, _dict, context_text=preview)
                         if _dict_applied:
-                            st.caption(f"📚 摘要辞書から {_dict_applied} 件の摘要・科目を決めました。")
+                            st.caption(f"摘要辞書から {_dict_applied} 件の摘要・科目を決めました。")
                     # 学習済みの摘要ルール（セブンイレブン→飲食代 等）を適用（辞書より優先）
                     _desc_rules = storage.list_desc_rules(client)
                     if _desc_rules:
                         _replaced = apply_description_rules(result.entries, _desc_rules)
                         if _replaced:
-                            st.caption(f"📝 学習済みの摘要ルールを {_replaced} 件に適用しました。")
+                            st.caption(f"学習済みの摘要ルールを {_replaced} 件に適用しました。")
                     for w in result.warnings:
                         st.warning(w)
                     with st.spinner("仕訳を登録中..."):
@@ -509,7 +509,7 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
         bump_ledger()  # 新しい台帳内容でエディタを作り直す
         st.success(f"合計 {added_total} 件の仕訳を「{client}」の台帳に追加しました。")
         # そのまま確認に進めるよう、仕訳の編集へのボタンを出す
-        if st.button("✏️ 仕訳の編集へ進む", type="primary", key="go_ledger"):
+        if st.button("仕訳の編集へ進む", type="primary", key="go_ledger"):
             st.session_state["nav"] = NAV_LEDGER
             st.rerun()
 
@@ -557,7 +557,7 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
     # スマホ写真などの大きな画像はOCRの上限(4MB)内に自動圧縮
     file_bytes, compress_note = compress_image_if_needed(f.getvalue(), f.name)
     if compress_note:
-        st.caption(f"🗜 {compress_note}")
+        st.caption(f"{compress_note}")
     with st.spinner("OCR処理中..."):
         ocr_lines = run_ocr_lines(file_bytes)
     texts = [ln.text for ln in ocr_lines]
@@ -668,7 +668,7 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
                     if matched["by"] == "name" and not e.note:
                         e.needs_review = False
             if matched_count:
-                st.caption(f"🔎 補助科目マスタと {matched_count} 件の摘要が一致しました。")
+                st.caption(f"補助科目マスタと {matched_count} 件の摘要が一致しました。")
             if bank_sub:
                 detail = (detail + " ・ " if detail else "") + bank_sub
     else:
@@ -750,7 +750,7 @@ def render_ledger(client: str) -> None:
     merged = _merge_editor_result(full, shown, edited)
 
     with col_save:
-        if st.button("💾 変更を保存", type="primary", use_container_width=True):
+        if st.button("変更を保存", type="primary", use_container_width=True):
             try:
                 # 直接編集の差分から摘要・科目のルールを学習する
                 learned_total = 0
@@ -782,7 +782,7 @@ def render_ledger(client: str) -> None:
 
     col_review, col_confirm, col_clear, _ = st.columns([1.2, 1, 1, 1.8])
     with col_review:
-        if st.button("✅ 要確認を一括解除", disabled=not review, use_container_width=True,
+        if st.button("要確認を一括解除", disabled=not review, use_container_width=True,
                      help="すべての行の「要確認」チェックを外して保存します"):
             cleared = merged.copy()
             cleared["要確認"] = False
@@ -792,13 +792,13 @@ def render_ledger(client: str) -> None:
     with col_confirm:
         confirm_clear = st.checkbox("全削除を許可", key="confirm_clear")
     with col_clear:
-        if st.button("🗑 台帳を全削除", disabled=not confirm_clear, use_container_width=True):
+        if st.button("台帳を全削除", disabled=not confirm_clear, use_container_width=True):
             storage.clear_entries(client)
             bump_ledger()
             st.rerun()
 
     # --- 摘要辞書から摘要を入れる（科目を選ぶ → その科目に登録された摘要を選ぶ） ---
-    with st.expander("📚 摘要辞書から摘要を入れる（科目を選んで、登録された摘要を選ぶ）"):
+    with st.expander("摘要辞書から摘要を入れる（科目を選んで、登録された摘要を選ぶ）"):
         if not _dict_terms:
             st.caption("「事前登録」の「③摘要辞書」に弥生の摘要科目一覧を登録すると使えます。")
         else:
@@ -832,7 +832,7 @@ def render_ledger(client: str) -> None:
                         st.rerun()
 
     # --- 科目の一括置換（学習機能付き） ---
-    with st.expander("🔁 科目の一括置換（次回からの自動適用も学習できます）"):
+    with st.expander("科目の一括置換（次回からの自動適用も学習できます）"):
         st.caption("摘要にキーワードを含む行の勘定科目をまとめて変更します。税区分も新しい科目に合わせて更新されます。")
         col_kw, col_side, col_acct = st.columns([2, 1, 2])
         bulk_keyword = col_kw.text_input("摘要に含まれるキーワード", key="bulk_keyword", placeholder="例: タイムズ")
@@ -882,7 +882,7 @@ def render_ledger(client: str) -> None:
                     st.rerun()
 
     # --- ファイル単位の取り消し ---
-    with st.expander("🗂 ファイル単位で取り込みを取り消す"):
+    with st.expander("ファイル単位で取り込みを取り消す"):
         st.caption("書類タイプの選び間違いなどで取り込んだ仕訳を、ファイルごとまとめて削除します。")
         source_files = storage.list_source_files_detail(client)
         if not source_files:
@@ -965,7 +965,7 @@ def render_export(client: str) -> None:
     csv_suffix = "" if period == "すべて" else "_" + period.replace("/", "")
     with col_dl:
         st.download_button(
-            "⬇️ 弥生CSVをダウンロード",
+            "弥生CSVをダウンロード",
             data=to_yayoi_csv(entries),
             file_name=f"yayoi_{client}{csv_suffix}.csv",
             mime="text/csv",
@@ -982,7 +982,7 @@ def render_export(client: str) -> None:
             ("仕訳件数", f"{len(entries)}<small> 件</small>", ""),
             ("合計金額", f"¥{sum(e.amount for e in entries):,}", ""),
             ("期間", f"{dates[0]:%-m/%-d} 〜 {dates[-1]:%-m/%-d}", ""),
-            ("要確認", ("⚠️ " if review_left else "✅ ") + html.escape(review_html), "warn" if review_left else "ok"),
+            ("要確認", html.escape(review_html), "warn" if review_left else "ok"),
         ]
     )
     if review_left:
@@ -1036,16 +1036,16 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
     meta = storage.get_master_meta(client, kind)
     if count:
         detail = (
-            f'📄 {html.escape(meta["file_name"])}'
+            f'{html.escape(meta["file_name"])}'
             f'<br><span class="when">{html.escape(meta["registered_at"])} に登録</span>'
             if meta and meta["file_name"]
             else '<span class="when">登録元のファイルは記録されていません</span>'
         )
         st.markdown(
-            f'<div class="yc-registered"><span class="done">✅ 登録済み {count}件</span>{detail}</div>',
+            f'<div class="yc-registered"><span class="done">登録済み {count}件</span>{detail}</div>',
             unsafe_allow_html=True,
         )
-        if st.button("🗑 削除して登録し直す", key=f"reset_{kind}", use_container_width=True):
+        if st.button("削除して登録し直す", key=f"reset_{kind}", use_container_width=True):
             save_fn(client, [])
             storage.clear_master_meta(client, kind)
             st.session_state["sub_flash"] = (
@@ -1054,7 +1054,7 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
             st.rerun()
         return
 
-    with st.expander("📖 手順"):
+    with st.expander("手順"):
         st.markdown(steps_md)
     uploaded = st.file_uploader(
         f"{info['label']}のPDF", type=["pdf"], key=f"{kind}_pdf", label_visibility="collapsed",
@@ -1073,7 +1073,7 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
             f"弥生の「{info['label']}」のPDFかどうか確認してください。"
         )
         return
-    st.success(f"✅ {len(records)} 件の{info['unit']}を読み取りました。内容を確認してください:")
+    st.success(f"{len(records)} 件の{info['unit']}を読み取りました。内容を確認してください:")
     summary_fn(records)
     if st.button(f"この {len(records)} 件を登録する", type="primary", key=f"{kind}_import",
                  use_container_width=True):
@@ -1081,7 +1081,7 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
             saved = save_fn(client, records)
             storage.set_master_meta(client, kind, uploaded.name)
         st.session_state["sub_flash"] = (
-            f"✅ 「{uploaded.name}」から {saved} 件の{info['unit']}を登録しました。"
+            f"「{uploaded.name}」から {saved} 件の{info['unit']}を登録しました。"
         )
         st.rerun()
 
@@ -1107,38 +1107,38 @@ def render_masters(client: str) -> None:
     # 上段は3つのカードでPDF登録だけを並べ、表（確認・編集）は下に全幅で置く。
     # 表を3カラムに入れると狭くて編集しづらいため。
     col_sub_master, col_acct_master, col_dict = st.columns(3)
-    with col_sub_master, st.container(border=True):
+    with col_sub_master, st.container(border=True, key="yccard3"):
         T.card_title(
-            "🗂 事前登録①：補助科目一覧",
+            "事前登録①：補助科目一覧",
             "弥生の「補助科目一覧.pdf」を登録します。通帳の摘要や売掛表・請求書の取引先から、補助科目を自動で振り分けます",
         )
         box_sub_pdf = st.container()
-    with col_acct_master, st.container(border=True):
+    with col_acct_master, st.container(border=True, key="yccard4"):
         T.card_title(
-            "📒 事前登録②：科目一覧表",
+            "事前登録②：科目一覧表",
             "弥生の「科目一覧表.pdf」を登録します。仕訳表の科目をプルダウンで選べるようになります",
         )
         box_acct_pdf = st.container()
-    with col_dict, st.container(border=True):
+    with col_dict, st.container(border=True, key="yccard5"):
         T.card_title(
-            "📚 事前登録③：摘要科目一覧",
+            "事前登録③：摘要科目一覧",
             "弥生の「摘要科目一覧.pdf」を登録します。書類の内容に辞書の語があれば、その会社の流儀の摘要と科目が入ります",
         )
         box_dict_pdf = st.container()
 
     # 登録内容の確認・編集（全幅・タブで切り替え）
-    with st.container(border=True):
-        T.card_title("📝 登録内容の確認・編集", "表を直接編集して「変更を保存」を押すと、登録内容を書き換えられます")
+    with st.container(border=True, key="yccard6"):
+        T.card_title("登録内容の確認・編集","表を直接編集して「変更を保存」を押すと、登録内容を書き換えられます")
         tab_master_list, tab_acct_list, tab_dict_list = st.tabs(
-            ["🗂 補助科目", "📒 勘定科目", "📚 摘要辞書"]
+            ["補助科目","勘定科目","摘要辞書"]
         )
 
-    with st.container(border=True):
+    with st.container(border=True, key="yccard7"):
         T.card_title(
-            "⚙️ 売掛・買掛の設定",
+            "売掛・買掛の設定",
             "書類タイプの紐付けと、行番号と取引先の対応。上の2つのマスタとは独立して設定できます",
         )
-        tab_doctype, tab_rowmap = st.tabs(["🔗 書類タイプの紐付け", "🔢 売掛・買掛の行番号"])
+        tab_doctype, tab_rowmap = st.tabs(["書類タイプの紐付け","売掛・買掛の行番号"])
 
     # --- 摘要辞書（摘要科目一覧）: PDFから一括登録 ---
     def _dict_summary(records: list[dict]) -> None:
@@ -1179,13 +1179,13 @@ def render_masters(client: str) -> None:
                 "サーチキー": st.column_config.TextColumn(help="弥生のサーチキー数字"),
             },
         )
-        if st.button("💾 変更を保存", key="dict_save"):
+        if st.button("変更を保存", key="dict_save"):
             records = [
                 {"description": r["摘要"], "account": r["勘定科目"], "search_key": r["サーチキー"]}
                 for _, r in edited_dict.iterrows()
             ]
             saved = storage.replace_desc_dict(client, records)
-            st.session_state["sub_flash"] = f"✅ {saved} 件の摘要辞書を保存しました。"
+            st.session_state["sub_flash"] = f"{saved} 件の摘要辞書を保存しました。"
             st.rerun()
 
     # --- 補助科目一覧: PDFから一括登録 ---
@@ -1236,7 +1236,7 @@ def render_masters(client: str) -> None:
                 "サーチキー": st.column_config.TextColumn(help="弥生のサーチキー英字。通帳のカタカナ摘要との照合に使います"),
             },
         )
-        if st.button("💾 変更を保存", key="sub_save"):
+        if st.button("変更を保存", key="sub_save"):
             edited_records = [
                 {"account": r["勘定科目"], "sub_name": r["補助科目"], "search_key": r["サーチキー"]}
                 for _, r in edited_master.iterrows()
@@ -1246,7 +1246,7 @@ def render_masters(client: str) -> None:
                 selected_account = account_filter.rsplit("（", 1)[0]
                 edited_records = [r for r in _master if r["account"] != selected_account] + edited_records
             saved = storage.replace_subaccounts(client, edited_records)
-            st.session_state["sub_flash"] = f"✅ {saved} 件を保存しました。"
+            st.session_state["sub_flash"] = f"{saved} 件を保存しました。"
             st.rerun()
 
     # --- 科目一覧表（勘定科目）: PDFから一括登録 ---
@@ -1289,13 +1289,13 @@ def render_masters(client: str) -> None:
                 "税区分": st.column_config.TextColumn(help="例: 対象外、課対仕入、課税売上"),
             },
         )
-        if st.button("💾 変更を保存", key="acct_save"):
+        if st.button("変更を保存", key="acct_save"):
             records = [
                 {"name": r["勘定科目"], "search_key": r["サーチキー"], "side": r["貸借"], "tax_class": r["税区分"]}
                 for _, r in edited_accts.iterrows()
             ]
             saved = storage.replace_account_master(client, records)
-            st.session_state["sub_flash"] = f"✅ {saved} 件の勘定科目を保存しました。"
+            st.session_state["sub_flash"] = f"{saved} 件の勘定科目を保存しました。"
             st.rerun()
 
     # --- 書類タイプ→科目の紐付け ---
@@ -1316,10 +1316,10 @@ def render_masters(client: str) -> None:
             credit = col_credit.selectbox("貸方科目", _options, index=_options.index(current["credit_account"]), key=f"doctype_credit_{dt}")
             _doctype_inputs[dt] = (debit, credit, current["sub_side"])
         st.caption("補助科目（取引先名）は、売上側は借方（売掛・未収系）、仕入側は貸方（買掛・未払系）に自動で入ります。")
-        if st.button("💾 紐付けを保存", key="doctype_save"):
+        if st.button("紐付けを保存", key="doctype_save"):
             for dt, (debit, credit, sub_side) in _doctype_inputs.items():
                 storage.set_doctype_rule(client, dt, debit, credit, sub_side)
-            st.session_state["sub_flash"] = "✅ 書類タイプの紐付けを保存しました。"
+            st.session_state["sub_flash"] ="書類タイプの紐付けを保存しました。"
             st.rerun()
 
     # --- 売掛表・買掛表の行番号→取引先 ---
@@ -1342,13 +1342,13 @@ def render_masters(client: str) -> None:
                 "取引先名": st.column_config.TextColumn(help="補助科目に入る取引先名。弥生の補助科目名と合わせてください"),
             },
         )
-        if st.button("💾 対応表を保存", key="rowmap_save"):
+        if st.button("対応表を保存", key="rowmap_save"):
             records = [
                 {"row_no": r["行番号"], "partner_name": r["取引先名"]}
                 for _, r in edited_rowmap.iterrows() if pd.notna(r["行番号"])
             ]
             saved = storage.replace_partner_rows(client, rowmap_side, records)
-            st.session_state["sub_flash"] = f"✅ {rowmap_choice}の対応表 {saved} 件を保存しました。"
+            st.session_state["sub_flash"] = f"{rowmap_choice}の対応表 {saved} 件を保存しました。"
             st.rerun()
 
 
@@ -1367,8 +1367,8 @@ def render_rules(client: str) -> None:
     )
 
     col_a, col_d = st.columns(2)
-    with col_a, st.container(border=True):
-        T.card_title("🧠 科目ルール", "摘要にキーワードを含む仕訳の勘定科目を自動で決めます")
+    with col_a, st.container(border=True, key="yccard8"):
+        T.card_title("科目ルール","摘要にキーワードを含む仕訳の勘定科目を自動で決めます")
         if not learned_rules:
             st.caption("まだありません。「仕訳の編集」で科目を書き換えると学習します。")
         for rule in learned_rules:
@@ -1379,8 +1379,8 @@ def render_rules(client: str) -> None:
             if c3.button("削除", key=f"rule_del_{rule['id']}"):
                 storage.delete_account_rule(rule["id"])
                 st.rerun()
-    with col_d, st.container(border=True):
-        T.card_title(f"🧠 摘要ルール（{client}）", "摘要を会社の流儀（例: セブンイレブン→飲食代）に書き換えます")
+    with col_d, st.container(border=True, key="yccard9"):
+        T.card_title(f"摘要ルール（{client}）","摘要を会社の流儀（例: セブンイレブン→飲食代）に書き換えます")
         if not learned_descs:
             st.caption("まだありません。「仕訳の編集」で摘要を書き換えると学習します。")
         for rule in learned_descs:

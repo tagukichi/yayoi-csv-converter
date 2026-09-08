@@ -26,7 +26,7 @@ except Exception:
     pass  # secrets 未設定（ローカル開発）なら何もしない
 
 st.set_page_config(
-    page_title="PDF → 弥生CSV 変換ツール", page_icon="📄", layout="wide",
+    page_title="PDF → 弥生CSV 変換ツール", layout="wide",
     initial_sidebar_state="expanded",
 )
 T.inject_css()
@@ -119,7 +119,7 @@ if client is None:
 # 仕訳表の未保存の編集は、画面を離れると widget の状態が消えるので
 # 切り替え時に自動保存する（表を編集したまま他の画面へ行っても消えない）
 if nav != views.NAV_LEDGER and views.persist_pending_edits(client):
-    st.toast("💾 仕訳表の編集を自動保存しました。")
+    st.toast("仕訳表の編集を自動保存しました。")
 
 if nav == views.NAV_IMPORT:
     views.render_import(client)
