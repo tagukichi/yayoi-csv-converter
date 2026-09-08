@@ -21,14 +21,15 @@ from models import JournalEntry
 
 DB_PATH = Path(__file__).resolve().parent / "data" / "journal.db"
 
-# 初回起動時に登録する企業（後から画面で追加・削除できる）
-DEFAULT_CLIENTS = ["A建設", "B工務店", "C社"]
+# 以前に見本として自動登録していた企業。空のものは起動時に片付ける
+# （企業は画面の「企業の追加・削除」から登録する）
+_SAMPLE_CLIENTS = ["A建設", "B工務店", "C社"]
 
 # data_editor での表示順・編集対象の列。DB の列と一対一。
 EDITABLE_COLUMNS = [
     "取引日付", "借方勘定科目", "借方補助科目", "借方税区分",
     "貸方勘定科目", "貸方補助科目", "貸方税区分",
-    "金額", "摘要", "要確認", "出典ファイル",
+    "金額", "摘要", "要確認", "備考", "出典ファイル",
 ]
 
 _CREATE_SQL = """
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS entries (
     amount INTEGER NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     needs_review INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 )
@@ -214,6 +216,7 @@ def _entry_to_record(client: str, e: JournalEntry, source_file: str) -> dict:
         "amount": e.amount,
         "description": e.description,
         "needs_review": bool(e.needs_review),
+        "note": e.note,
         "source_file": source_file,
     }
 
@@ -231,6 +234,7 @@ def _row_to_record(client: str, r: pd.Series) -> dict:
         "amount": int(r["金額"]),
         "description": str(r["摘要"]).strip(),
         "needs_review": bool(r["要確認"]),
+        "note": str(r.get("備考", "") or "").strip(),
         "source_file": str(r["出典ファイル"]).strip(),
     }
 
@@ -246,6 +250,7 @@ _JP_COLUMNS = {
     "amount": "金額",
     "description": "摘要",
     "needs_review": "要確認",
+    "note": "備考",
     "source_file": "出典ファイル",
 }
 
@@ -271,20 +276,24 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
     conn.execute(_CREATE_DESC_DICT_SQL)
     conn.execute(_CREATE_MASTER_META_SQL)
-    # 既存DBへの補助科目列の追加（後方互換のためのマイグレーション）
+    # 既存DBへの列追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
         conn.execute("ALTER TABLE entries ADD COLUMN debit_sub TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE entries ADD COLUMN credit_sub TEXT NOT NULL DEFAULT ''")
         conn.commit()
-    # 初回のみ既定の企業を登録する（user_version を「初期化済み」フラグに使う。
-    # 全企業を削除しても勝手に復活しないようにするため）
-    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+    if "note" not in existing_cols:
+        conn.execute("ALTER TABLE entries ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    # 見本として入れていた既定の企業（A建設・B工務店・C社）を片付ける。
+    # 仕訳が1件も入っていないものだけ消すので、実際に使い始めた企業は残る
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
         conn.executemany(
-            "INSERT OR IGNORE INTO clients (name) VALUES (?)",
-            [(name,) for name in DEFAULT_CLIENTS],
+            """DELETE FROM clients WHERE name = ?
+               AND NOT EXISTS (SELECT 1 FROM entries WHERE entries.client = clients.name)""",
+            [(name,) for name in _SAMPLE_CLIENTS],
         )
-        conn.execute("PRAGMA user_version = 1")
+        conn.execute("PRAGMA user_version = 2")
         conn.commit()
     return conn
 
@@ -347,8 +356,8 @@ def add_entries(
             """INSERT INTO entries
                (client, date, debit_account, debit_sub, debit_tax,
                 credit_account, credit_sub, credit_tax, amount, description,
-                needs_review, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                needs_review, note, source_file)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     client,
@@ -362,6 +371,7 @@ def add_entries(
                     e.amount,
                     e.description,
                     int(e.needs_review),
+                    e.note,
                     source_file,
                 )
                 for e in entries
@@ -390,6 +400,7 @@ def load_entries(client: str, db_path: Path = DB_PATH) -> pd.DataFrame:
                       amount AS 金額,
                       description AS 摘要,
                       needs_review AS 要確認,
+                      note AS 備考,
                       source_file AS 出典ファイル
                FROM entries WHERE client = ? ORDER BY date, id""",
             conn,
@@ -426,6 +437,7 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
                 int(r["金額"]),
                 str(r["摘要"]).strip(),
                 int(bool(r["要確認"])),
+                str(r.get("備考", "") or "").strip(),
                 str(r["出典ファイル"]).strip(),
             )
             for _, r in df.iterrows()
@@ -434,8 +446,8 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
             """INSERT INTO entries
                (client, date, debit_account, debit_sub, debit_tax,
                 credit_account, credit_sub, credit_tax, amount, description,
-                needs_review, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                needs_review, note, source_file)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
     return len(rows)

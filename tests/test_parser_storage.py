@@ -721,11 +721,55 @@ def test_storage_roundtrip():
         assert storage.load_entries("A建設", db_path=db).empty
 
 
+def test_sample_clients_cleaned_up():
+    """見本の企業（A建設など）は、仕訳がなければ起動時に片付ける。"""
+    import sqlite3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        # 使い始めた企業（仕訳あり）を先に作っておく
+        storage.add_entries(
+            "B工務店",
+            [JournalEntry(date=date(2026, 4, 1), debit_account="雑費",
+                          credit_account="現金", amount=100)],
+            db_path=db,
+        )
+        # 旧バージョンの状態を再現（見本の企業が入っていて user_version=1）
+        with sqlite3.connect(db) as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO clients (name) VALUES (?)",
+                [("A建設",), ("B工務店",), ("C社",)],
+            )
+            conn.execute("PRAGMA user_version = 1")
+        # 起動時の片付けで、空の A建設・C社 だけが消える
+        assert storage.list_clients(db_path=db) == ["B工務店"]
+
+
+def test_note_is_saved():
+    """備考（読み取り時のメモ）が保存・読み出しできる。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        storage.add_entries(
+            "A建設",
+            [JournalEntry(date=date(2026, 4, 1), debit_account="雑費",
+                          credit_account="現金", amount=100,
+                          note="日付を読み取れず本日日付を仮置き")],
+            db_path=db,
+        )
+        df = storage.load_entries("A建設", db_path=db)
+        assert df.loc[0, "備考"] == "日付を読み取れず本日日付を仮置き"
+        # 画面からの保存でも備考が残る
+        storage.replace_entries("A建設", df, db_path=db)
+        assert storage.load_entries("A建設", db_path=db).loc[0, "備考"] == (
+            "日付を読み取れず本日日付を仮置き"
+        )
+
+
 def test_client_management():
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "test.db"
-        # 初回は既定の企業が登録されている
-        assert storage.list_clients(db_path=db) == ["A建設", "B工務店", "C社"]
+        # 初回は企業なし（見本の企業は自動登録しない）
+        assert storage.list_clients(db_path=db) == []
 
         assert storage.add_client("D商事", db_path=db) is True
         assert "D商事" in storage.list_clients(db_path=db)

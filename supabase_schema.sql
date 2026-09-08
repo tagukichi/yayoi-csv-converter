@@ -126,3 +126,6 @@ create table if not exists master_meta (
   registered_at text not null default '',
   unique (client, kind)
 );
+
+-- 仕訳の備考（日付を読み取れず本日日付を仮置き、残高不一致 など）
+alter table entries add column if not exists note text not null default '';

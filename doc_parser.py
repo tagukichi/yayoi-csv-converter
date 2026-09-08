@@ -369,8 +369,10 @@ def parse_document(
         return result
 
     found_date = _find_date(lines)
+    date_note = ""
     if found_date is None:
         found_date = date.today()
+        date_note = "日付を読み取れず本日日付を仮置き"
         result.warnings.append(
             "日付を検出できなかったため本日日付を仮置きしました。表で修正してください。"
         )
@@ -422,7 +424,10 @@ def parse_document(
     reduced_hint = ("軽減" in text) or re.search(r"8\s*[%％]\s*(?:軽減)?対象", text)
 
     def _entry(amount: int, tax: str, desc: str, entry_note: str) -> JournalEntry:
-        # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す
+        # 暫定解析のため、科目が推定できた場合でも一律で人の確認に回す。
+        # 日付を仮置きした場合は、どの行かひと目で分かるよう備考の先頭に出す
+        if date_note and date_note not in entry_note:
+            entry_note = f"{date_note} / {entry_note}" if entry_note else date_note
         return JournalEntry(
             date=found_date,
             debit_account=debit_account,
