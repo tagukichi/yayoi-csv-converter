@@ -135,6 +135,7 @@ with st.sidebar:
             views.NAV_EXPORT: ":material/download:",
             views.NAV_MASTERS: ":material/menu_book:",
             views.NAV_RULES: ":material/psychology:",
+            views.NAV_SETTINGS: ":material/settings:",
         }
         label = f"{icons[item]} {item}"
         if item == views.NAV_LEDGER and review_n:
@@ -173,5 +174,7 @@ elif nav == views.NAV_EXPORT:
     views.render_export(client)
 elif nav == views.NAV_MASTERS:
     views.render_masters(client)
-else:
+elif nav == views.NAV_RULES:
     views.render_rules(client)
+else:
+    views.render_settings(client)

@@ -331,6 +331,27 @@ section[data-testid="stMain"] [data-testid="stAlertContainer"] p {{
 .yc-log .row.skip .name, .yc-log .row.skip .detail {{ color: {MUTED}; }}
 .yc-log .empty {{ padding: 18px; font-size: 12px; color: {MUTED}; }}
 
+/* ---------- 設定: ロールカードと権限表 ---------- */
+.yc-role {{ padding: 4px 2px 8px; }}
+.yc-role-name {{ font-size: 17px; font-weight: 700; color: {ACCENT}; margin-bottom: 4px; }}
+.yc-role-name span {{ font-size: 12px; font-weight: 400; color: {GRAY_TEXT}; margin-left: 10px; }}
+.yc-role p {{ font-size: 14px; color: {GRAY_TEXT}; margin: 0 0 10px; line-height: 1.7; }}
+.yc-role ul {{ margin: 0; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }}
+.yc-role li {{ font-size: 14px; line-height: 1.6; padding-left: 18px; position: relative; }}
+.yc-role li::before {{
+    content: ""; position: absolute; left: 2px; top: 0.6em;
+    width: 7px; height: 7px; border-radius: 2px; background: {ACCENT_LIGHT};
+}}
+[data-testid="stColumn"]:nth-child(2) .yc-role-name {{ color: {AMBER}; }}
+[data-testid="stColumn"]:nth-child(2) .yc-role li::before {{ background: {AMBER}; }}
+.yc-matrix th.mark, .yc-matrix td.mark {{ text-align: center; width: 90px; }}
+.yc-matrix td.mark.yes {{ color: {GREEN}; font-weight: 700; }}
+.yc-matrix td.mark.no {{ color: {MUTED}; opacity: 0.6; }}
+.yc-matrix tr.grp td {{
+    background: #f6f6f3; font-size: 12px; font-weight: 700; color: {GRAY_TEXT};
+    padding: 7px 12px;
+}}
+
 /* ---------- 出力プレビュー表 ---------- */
 .yc-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
 .yc-table th {{
