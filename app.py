@@ -61,10 +61,54 @@ if not _check_password():
 
 # --- サイドバー: ロゴ・クライアント切替・ナビ ---
 with st.sidebar:
-    # サービス名はヘッダーに出しているので、サイドバーは企業選択から始める
+    # サービス名はヘッダーに出しているので、サイドバーは企業選択から始める。
+    # 顧問先が増えても探せるよう、要確認の残件数つき・並び替えできる形にする
     clients = storage.list_clients()
-    st.markdown('<div class="yc-side-label">クライアント企業</div>', unsafe_allow_html=True)
-    client = st.selectbox("クライアント企業", clients, label_visibility="collapsed") if clients else None
+    client = None
+    if clients:
+        _prefs = storage.list_client_prefs()
+        _review_counts = storage.review_counts_by_client()
+        _sort_label = st.session_state.get("client_sort", "最近使った順")
+        clients = storage.sort_clients(
+            clients, _prefs, _review_counts, storage.CLIENT_SORTS[_sort_label]
+        )
+
+        def _client_label(name: str) -> str:
+            """ピン留めの印と、要確認の残件数を名前の後ろに付ける。"""
+            label = f"{'★ ' if _prefs.get(name, {}).get('pinned') else ''}{name}"
+            n = _review_counts.get(name, 0)
+            return f"{label} ・要確認 {n}" if n else label
+
+        st.markdown('<div class="yc-side-label">クライアント企業</div>', unsafe_allow_html=True)
+        # 並び替えを変えると選択肢の順番が変わり、Streamlit はセレクタを作り直す。
+        # そのとき選択が先頭の企業に移らないよう、選んでいた企業を覚えておいて
+        # その位置を初期値にする
+        _selected = st.session_state.get("current_client")
+        client = st.selectbox(
+            "クライアント企業", clients, format_func=_client_label,
+            index=clients.index(_selected) if _selected in clients else 0,
+            label_visibility="collapsed",
+            help="名前を入力すると絞り込めます",
+        )
+        st.session_state["current_client"] = client
+
+        col_sort, col_pin = st.columns([3, 1])
+        col_sort.selectbox(
+            "並び替え", list(storage.CLIENT_SORTS), key="client_sort",
+            label_visibility="collapsed",
+        )
+        _pinned = _prefs.get(client, {}).get("pinned", False)
+        if col_pin.button(
+            "★" if _pinned else "☆", key="pin_client", use_container_width=True,
+            help="ピン留めするとセレクタの先頭に固定されます",
+        ):
+            storage.set_client_pinned(client, not _pinned)
+            st.rerun()
+
+        # 「最近使った順」のために、企業を切り替えたときだけ時刻を記録する
+        if st.session_state.get("last_client") != client:
+            st.session_state["last_client"] = client
+            storage.touch_client_opened(client)
 
     with st.expander("企業の追加・削除"):
         new_client = st.text_input("追加する企業名", key="new_client_name")
