@@ -1,9 +1,9 @@
 -- Supabase の SQL Editor でこのファイルの内容を実行してテーブルを作成する。
 -- 構造はローカル SQLite 版（storage.py）と同一。
 --
--- 注意: 現段階（検証フェーズ・単独利用）では RLS を無効のまま anon キーで
--- アクセスする。SaaS 化してログインを入れる段階で RLS を有効化し、
--- テナントごとのポリシーを設定すること。
+-- 接続は service_role キーで行い、全テーブルで RLS を有効にする
+-- （末尾を参照）。ログインを入れてテナントを分ける段階で、テナント単位の
+-- ポリシーを追加する。
 
 create table if not exists clients (
   id bigint generated always as identity primary key,
@@ -138,3 +138,28 @@ create table if not exists client_prefs (
   pinned boolean not null default false,
   last_opened_at text not null default ''
 );
+
+-- ================================================================
+-- アクセス制限（RLS）
+-- ================================================================
+-- すべてのテーブルで行レベルセキュリティを有効にし、ポリシーは作らない。
+-- これで anon キー（公開前提のキー）からは一切読み書きできなくなる。
+--
+-- アプリ（Streamlit）は service_role キーで接続するので RLS を迂回する。
+-- Streamlit はサーバー側で動き、キーがブラウザに渡ることはないため、
+-- 会計データを anon キー任せにするより安全。
+--
+-- ログインを入れてテナントを分ける段階で、ここにテナント単位のポリシーを
+-- 追加し、アプリ側もログインユーザーのキーで接続するように変える。
+
+alter table clients        enable row level security;
+alter table entries        enable row level security;
+alter table subaccounts    enable row level security;
+alter table account_master enable row level security;
+alter table desc_dict      enable row level security;
+alter table desc_rules     enable row level security;
+alter table account_rules  enable row level security;
+alter table doctype_rules  enable row level security;
+alter table partner_rows   enable row level security;
+alter table master_meta    enable row level security;
+alter table client_prefs   enable row level security;
