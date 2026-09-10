@@ -746,6 +746,51 @@ def test_sample_clients_cleaned_up():
         assert storage.load_entries("A建設", db_path=db).empty
 
 
+def test_client_selector_sorting():
+    """企業セレクタの並び替え: ピン留め最優先、その中で指定の順。"""
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        for name in ("ぜ社", "A建設", "中塚工務店"):
+            storage.add_client(name, db_path=db)
+
+        def review_entry():
+            return JournalEntry(date=date(2026, 9, 1), debit_account="雑費",
+                                credit_account="現金", amount=100, needs_review=True)
+
+        storage.add_entries("A建設", [review_entry()] * 3, db_path=db)
+        storage.add_entries("ぜ社", [review_entry()], db_path=db)
+        assert storage.review_counts_by_client(db_path=db) == {"A建設": 3, "ぜ社": 1}
+
+        storage.touch_client_opened("中塚工務店", db_path=db)
+        time.sleep(1.1)  # 秒単位で記録するため
+        storage.touch_client_opened("ぜ社", db_path=db)
+
+        clients = storage.list_clients(db_path=db)
+        prefs = storage.list_client_prefs(db_path=db)
+        counts = storage.review_counts_by_client(db_path=db)
+
+        # 最近使った順: 開いていない企業は後ろ
+        assert storage.sort_clients(clients, prefs, counts, "recent") == [
+            "ぜ社", "中塚工務店", "A建設"]
+        assert storage.sort_clients(clients, prefs, counts, "name") == [
+            "A建設", "ぜ社", "中塚工務店"]
+        assert storage.sort_clients(clients, prefs, counts, "review") == [
+            "A建設", "ぜ社", "中塚工務店"]
+
+        # ピン留めした企業はどの並びでも先頭
+        storage.set_client_pinned("中塚工務店", True, db_path=db)
+        prefs = storage.list_client_prefs(db_path=db)
+        assert prefs["中塚工務店"]["pinned"] is True
+        for order in ("recent", "name", "review"):
+            assert storage.sort_clients(clients, prefs, counts, order)[0] == "中塚工務店"
+
+        # ピン留めは解除できる
+        storage.set_client_pinned("中塚工務店", False, db_path=db)
+        assert storage.list_client_prefs(db_path=db)["中塚工務店"]["pinned"] is False
+
+
 def test_delete_client_purges_masters():
     """企業を削除すると、その企業のマスタや摘要ルールもまとめて消える。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -761,7 +806,10 @@ def test_delete_client_purges_masters():
         )
         storage.add_desc_rule("D商事", "セブン", "飲食代", db_path=db)
 
+        storage.set_client_pinned("D商事", True, db_path=db)
+
         storage.delete_client("D商事", db_path=db)
+        assert "D商事" not in storage.list_client_prefs(db_path=db)
         assert storage.list_subaccounts("D商事", db_path=db) == []
         assert storage.list_account_master("D商事", db_path=db) == []
         assert storage.list_desc_dict("D商事", db_path=db) == []

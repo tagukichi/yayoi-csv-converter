@@ -129,3 +129,12 @@ create table if not exists master_meta (
 
 -- 仕訳の備考（日付を読み取れず本日日付を仮置き、残高不一致 など）
 alter table entries add column if not exists note text not null default '';
+
+-- 企業セレクタの表示設定（ピン留め・最後に開いた日時）
+-- ログイン導入後は user_id を足して人ごとの設定にする
+create table if not exists client_prefs (
+  id bigint generated always as identity primary key,
+  client text not null unique,
+  pinned boolean not null default false,
+  last_opened_at text not null default ''
+);

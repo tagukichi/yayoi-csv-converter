@@ -117,7 +117,7 @@ button[data-testid="stExpandSidebarButton"]:hover {{
 
 /* ---------- サイドバー ---------- */
 section[data-testid="stSidebar"] {{
-    width: 300px !important;
+    width: 320px !important;
     border-right: 0;
 }}
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div > div {{
@@ -143,6 +143,21 @@ section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] {{
 }}
 .yc-side-label {{
     font-size: 12px; color: #9aa3c0; margin: 8px 6px 3px 6px;
+}}
+/* 企業セレクタの下の「並び替え」とピン留めボタンは控えめに */
+section[data-testid="stSidebar"] [data-testid="stColumn"] [data-baseweb="select"] > div {{
+    min-height: 34px;
+}}
+section[data-testid="stSidebar"] [data-testid="stColumn"] [data-baseweb="select"] div {{
+    font-size: 12.5px !important; color: #9aa3c0;
+}}
+section[data-testid="stSidebar"] [data-testid="stColumn"] button {{
+    min-height: 34px !important; padding: 2px !important;
+    background: rgba(255,255,255,0.07) !important; border: 0 !important;
+    color: #e8eaf2 !important; font-size: 15px !important;
+}}
+section[data-testid="stSidebar"] [data-testid="stColumn"] button:hover {{
+    background: rgba(255,255,255,0.16) !important;
 }}
 /* クライアント選択（サイドバー内のセレクトボックス） */
 section[data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div {{

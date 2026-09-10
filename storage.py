@@ -161,6 +161,17 @@ CREATE TABLE IF NOT EXISTS master_meta (
 )
 """
 
+# 企業セレクタの表示設定（ピン留め・最後に開いた日時）。
+# ログイン導入後は user_id を足して人ごとの設定にする。
+_CREATE_CLIENT_PREFS_SQL = """
+CREATE TABLE IF NOT EXISTS client_prefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL UNIQUE,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    last_opened_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
 # 一括置換から学習した「摘要キーワード → 勘定科目」ルール。
 # side: expense=借方（費用）, income=貸方（収益）
 _CREATE_RULES_SQL = """
@@ -276,6 +287,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
     conn.execute(_CREATE_DESC_DICT_SQL)
     conn.execute(_CREATE_MASTER_META_SQL)
+    conn.execute(_CREATE_CLIENT_PREFS_SQL)
     # 既存DBへの列追加（後方互換のためのマイグレーション）
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
     if "debit_sub" not in existing_cols:
@@ -326,7 +338,7 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
 # 企業ごとに持っているデータ（企業を消すときはまとめて消す）
 _CLIENT_TABLES = (
     "entries", "subaccounts", "account_master", "desc_dict",
-    "desc_rules", "doctype_rules", "partner_rows", "master_meta",
+    "desc_rules", "doctype_rules", "partner_rows", "master_meta", "client_prefs",
 )
 
 
@@ -483,6 +495,116 @@ def list_source_files(client: str, db_path: Path = DB_PATH) -> list[tuple[str, i
             (client,),
         ).fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+def review_counts_by_client(db_path: Path = DB_PATH) -> dict[str, int]:
+    """企業名 → 要確認の残件数。企業セレクタのバッジに使う（1回の問い合わせで全社分）。"""
+    if _supabase_enabled(db_path):
+        res = (
+            _sb().table("entries").select("client")
+            .eq("needs_review", True).execute()
+        )
+        counts: dict[str, int] = {}
+        for r in res.data:
+            counts[r["client"]] = counts.get(r["client"], 0) + 1
+        return counts
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT client, COUNT(*) FROM entries WHERE needs_review = 1 GROUP BY client"
+        ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def list_client_prefs(db_path: Path = DB_PATH) -> dict[str, dict]:
+    """企業名 → 表示設定（pinned・last_opened_at）。未設定の企業は入らない。"""
+    if _supabase_enabled(db_path):
+        rows = _sb().table("client_prefs").select("*").execute().data
+    else:
+        with _connect(db_path) as conn:
+            fetched = conn.execute(
+                "SELECT client, pinned, last_opened_at FROM client_prefs"
+            ).fetchall()
+        rows = [
+            {"client": r[0], "pinned": r[1], "last_opened_at": r[2]} for r in fetched
+        ]
+    return {
+        r["client"]: {
+            "pinned": bool(r["pinned"]),
+            "last_opened_at": r["last_opened_at"] or "",
+        }
+        for r in rows
+    }
+
+
+def set_client_pinned(client: str, pinned: bool, db_path: Path = DB_PATH) -> None:
+    """企業のピン留めを設定する（セレクタの先頭に固定される）。"""
+    if _supabase_enabled(db_path):
+        _sb().table("client_prefs").upsert(
+            {"client": client, "pinned": bool(pinned)}, on_conflict="client"
+        ).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO client_prefs (client, pinned) VALUES (?, ?)
+               ON CONFLICT (client) DO UPDATE SET pinned = excluded.pinned""",
+            (client, int(bool(pinned))),
+        )
+
+
+def touch_client_opened(client: str, db_path: Path = DB_PATH) -> None:
+    """企業を開いた時刻を記録する（「最近使った順」の並び替えに使う）。"""
+    now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    if _supabase_enabled(db_path):
+        _sb().table("client_prefs").upsert(
+            {"client": client, "last_opened_at": now}, on_conflict="client"
+        ).execute()
+        return
+    with _connect(db_path) as conn:
+        conn.execute(
+            """INSERT INTO client_prefs (client, last_opened_at) VALUES (?, ?)
+               ON CONFLICT (client) DO UPDATE SET last_opened_at = excluded.last_opened_at""",
+            (client, now),
+        )
+
+
+# 企業セレクタの並び替え（画面のラベル → 並べ方の指定）
+CLIENT_SORTS = {
+    "最近使った順": "recent",
+    "名前順": "name",
+    "要確認が多い順": "review",
+}
+
+
+def sort_clients(
+    clients: list[str],
+    prefs: dict[str, dict],
+    review_counts: dict[str, int],
+    order: str = "recent",
+) -> list[str]:
+    """企業セレクタの並び順を作る。ピン留めした企業は常に先頭。"""
+    def key(name: str):
+        pref = prefs.get(name, {})
+        pinned = 0 if pref.get("pinned") else 1  # ピン留めを先に
+        if order == "name":
+            return (pinned, name)
+        if order == "review":
+            return (pinned, -review_counts.get(name, 0), name)
+        # 最近使った順（未使用の企業は後ろ）
+        return (pinned, _reverse_time(pref.get("last_opened_at", "")), name)
+
+    return sorted(clients, key=key)
+
+
+def _reverse_time(stamp: str) -> str:
+    """新しい日時ほど小さくなる文字列（昇順ソートで降順になる）。
+
+    一度も開いていない企業は "9" を返し、開いたことのある企業（"1" 始まり）
+    より後ろに並ぶようにする。
+    """
+    if not stamp:
+        return "9"
+    # 数字を反転させると、文字列の昇順がそのまま日時の降順になる
+    return "1" + "".join(str(9 - int(c)) if c.isdigit() else c for c in stamp)
 
 
 def list_source_files_detail(client: str, db_path: Path = DB_PATH) -> list[dict]:
