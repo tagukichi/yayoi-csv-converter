@@ -70,9 +70,10 @@ NAV_LEDGER = "仕訳の編集"
 NAV_EXPORT = "弥生CSV出力"
 NAV_MASTERS = "事前登録"
 NAV_RULES = "学習ルール"
+NAV_SETTINGS = "設定"
 # 作業の順番どおりに並べる: 事前登録（会社ごとに最初の1回）→ 日々の取り込み・
 # 編集・出力 → 学習ルール
-NAV_ITEMS = [NAV_MASTERS, NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_RULES]
+NAV_ITEMS = [NAV_MASTERS, NAV_IMPORT, NAV_LEDGER, NAV_EXPORT, NAV_RULES, NAV_SETTINGS]
 
 
 def setup_status(client: str) -> list[tuple[str, int]]:
@@ -1395,3 +1396,122 @@ def render_rules(client: str) -> None:
             if c3.button("削除", key=f"desc_del_{rule['id']}"):
                 storage.delete_desc_rule(rule["id"])
                 st.rerun()
+
+
+# =====================================================================
+# 設定（事務所の情報・ユーザーロール）
+# =====================================================================
+
+# ユーザーロール（設計で確定したもの）。原則: 管理と削除は管理者だけ、
+# 修正と編集は一般もできる。ログイン導入後にこの表どおり出し分ける
+ROLE_ADMIN = "管理者"
+ROLE_MEMBER = "一般"
+
+ROLES = [
+    (
+        ROLE_ADMIN, "所長・マネージャー想定",
+        "契約とデータに責任を持つ人。日常業務も一般と同じようにできます。",
+        [
+            "契約・請求の確認、プラン変更",
+            "ユーザーの招待・権限変更・削除",
+            "クライアント企業の追加・削除",
+            "担当者の割り当て",
+            "事前登録の差し替え（削除して登録し直す）",
+            "学習ルールの削除",
+            "台帳の全削除",
+            "操作履歴（誰が何を消したか）の確認",
+        ],
+    ),
+    (
+        ROLE_MEMBER, "担当スタッフ想定",
+        "担当する企業の入力を回す人。作る・直すは自由にでき、消す操作だけができません。",
+        [
+            "担当企業の書類の取り込み",
+            "仕訳の編集・保存・要確認の解除",
+            "事前登録のPDF登録と、登録内容の編集",
+            "売掛・買掛の設定",
+            "一括置換とルールの学習",
+            "弥生CSVの出力",
+            "学習ルールの閲覧（削除は不可）",
+        ],
+    ),
+]
+
+# 画面ごとの権限。(操作, 管理者, 一般)。グループ名は表の見出しに使う
+ROLE_MATRIX = [
+    ("作る・直す — 一般もできる", [
+        ("科目一覧表・補助科目一覧・摘要科目一覧のPDF登録", True, True),
+        ("登録内容の確認・編集（表の直接編集）", True, True),
+        ("売掛・買掛の設定（紐付け・行番号）", True, True),
+        ("書類の取り込み（OCR・変換）", True, True),
+        ("仕訳の編集・保存", True, True),
+        ("要確認の一括解除", True, True),
+        ("摘要辞書から摘要を入れる", True, True),
+        ("科目の一括置換（ルールを学習する）", True, True),
+        ("弥生CSVの出力", True, True),
+        ("学習ルールの閲覧", True, True),
+        ("ファイル単位で取り込みを取り消す（選び間違いのやり直し）", True, True),
+    ]),
+    ("消す — 管理者だけ", [
+        ("事前登録を削除して登録し直す（差し替え）", True, False),
+        ("台帳を全削除", True, False),
+        ("学習ルールの削除", True, False),
+        ("クライアント企業の削除", True, False),
+    ]),
+    ("管理 — 管理者だけ", [
+        ("クライアント企業の追加", True, False),
+        ("担当者の割り当て", True, False),
+        ("ユーザーの招待・権限変更", True, False),
+        ("契約・請求の確認", True, False),
+    ]),
+]
+
+
+def render_settings(client: str) -> None:
+    clients = storage.list_clients()
+    T.page_header(NAV_SETTINGS, meta=f"保存先: {storage.backend_name()} ・ 登録企業 {len(clients)}社")
+
+    with st.container(border=True, key="yccard_settings_office"):
+        T.card_title("事務所", "契約者（テナント）の情報。ログイン導入時にここで編集できるようになります")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("事務所名", T.OFFICE_LABEL.split(" ・ ")[0])
+        c2.metric("クライアント企業", f"{len(clients)}社")
+        c3.metric("あなたのロール", f"{ROLE_ADMIN}（仮）")
+        st.caption(
+            "ログインはまだ無いため、いまは全員が管理者と同じ操作ができます。"
+            "ログイン導入後は、下の表のとおり一般ユーザーには「消す」操作と管理業務が出なくなります。"
+        )
+
+    with st.container(border=True, key="yccard_settings_roles"):
+        T.card_title(
+            "ユーザーロール",
+            "原則: 管理と削除は管理者だけ。修正と編集は一般もできる。",
+        )
+        col_a, col_m = st.columns(2)
+        for col, (name, who, desc, items) in zip((col_a, col_m), ROLES):
+            with col:
+                st.markdown(
+                    f'<div class="yc-role"><div class="yc-role-name">{html.escape(name)}'
+                    f'<span>{html.escape(who)}</span></div>'
+                    f'<p>{html.escape(desc)}</p>'
+                    + "".join(f"<li>{html.escape(i)}</li>" for i in items).join(("<ul>", "</ul>"))
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    rows = []
+    for group, ops in ROLE_MATRIX:
+        rows.append(f'<tr class="grp"><td colspan="3">{html.escape(group)}</td></tr>')
+        for op, admin, member in ops:
+            mark = lambda ok: '<td class="mark yes">●</td>' if ok else '<td class="mark no">−</td>'
+            rows.append(f"<tr><td>{html.escape(op)}</td>{mark(admin)}{mark(member)}</tr>")
+    st.markdown(
+        '<div class="yc-table-wrap">'
+        '<div class="head">画面ごとの権限<span>● できる　− できない</span></div>'
+        '<table class="yc-table yc-matrix"><thead><tr>'
+        f'<th>画面・操作</th><th class="mark">{ROLE_ADMIN}</th><th class="mark">{ROLE_MEMBER}</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        '<div class="foot">この表は設計で確定した内容です。ログイン導入時に、この表どおりボタンの出し分けとサーバー側の判定を入れます。</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
