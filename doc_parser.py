@@ -938,6 +938,26 @@ _PAYROLL_LABELS = [
 # 金額行を無視すべき見出し（対象外の集計行など）
 _PAYROLL_IGNORE_LABELS = ("支給額合計", "小計", "差引控除後", "単価", "日数", "残業単価", "残業時間", "基本給", "役職手当", "手当")
 
+# 「控除金額」欄（所得税・住民税の後〜⑥小計の前）に会社独自の控除項目が
+# 並ぶことがある（駐車場代・社宅・水道光熱費・立替返済 など）。項目名は
+# 会社ごとに違うため固定で持たず、この欄の見出しは何でも控除として拾う。
+# 科目は事前登録（給与の控除項目）で会社ごとに決め、未設定なら預り金
+# （補助科目＝項目名）で要確認にする。
+_OTHER_DEDUCTION_DEFAULT_ACCOUNT = "預り金"
+
+# 見出しとして拾わない文字（行番号・区分の縦書き見出し「控除金額」等）
+_OTHER_DEDUCTION_SKIP = re.compile(r"^[\d\s①-⑳()（）\-－・.]*$|^控除|^金額$|^社会保険料$")
+
+
+def _payroll_row_label(cells: list[OcrLine]) -> str:
+    """ラベル行の見出し名を返す（従業員列ぶん繰り返されている場合は先頭）。"""
+    for c in cells:
+        t = c.text.strip().replace("　", " ")
+        # 1文字は縦書きの区分見出し「控除金額」がばらけたもの（控・除・金・額）
+        if len(t) >= 2 and _parse_cell_amount(t) is None and not _OTHER_DEDUCTION_SKIP.match(t):
+            return t
+    return ""
+
 
 def _payroll_month_end(rows: list[list[OcrLine]], result: ParseResult) -> date:
     """給与台帳の「支給月分」と年の記載から月末日付を決める（発生主義）。"""
@@ -978,14 +998,26 @@ def _payroll_month_end(rows: list[list[OcrLine]], result: ParseResult) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
 
 
-def parse_payroll(rows: list[list[OcrLine]], source_name: str = "") -> ParseResult:
-    """給与台帳（従業員別の列＋合計列）から給与仕訳一式を起こす。"""
+def parse_payroll(
+    rows: list[list[OcrLine]],
+    source_name: str = "",
+    deduction_rules: dict[str, tuple[str, str]] | None = None,
+) -> ParseResult:
+    """給与台帳（従業員別の列＋合計列）から給与仕訳一式を起こす。
+
+    deduction_rules: 会社独自の控除項目名 → (勘定科目, 補助科目)。
+    事前登録「給与の控除項目」の内容。未設定の項目は預り金で要確認にする。
+    """
     result = ParseResult()
     entry_date = _payroll_month_end(rows, result)
+    deduction_rules = deduction_rules or {}
 
     # 「ラベル行 → 金額行」の並びを前提に、合計列（行の右端の金額）を拾う
     values: dict[str, int] = {}
+    # 控除金額欄の会社独自の項目（出てきた順に保つ）: 項目名 → 合計金額
+    other_deductions: dict[str, int] = {}
     pending: str | None = None
+    in_deduction_block = False  # 所得税〜⑥小計 の間（会社独自の控除が並ぶ欄）
     for cells in rows:
         normalized = "".join(c.text for c in cells).replace(" ", "").replace("　", "")
         amounts = [a for c in cells if (a := _parse_cell_amount(c.text)) is not None]
@@ -996,6 +1028,11 @@ def parse_payroll(rows: list[list[OcrLine]], source_name: str = "") -> ParseResu
                 label_key = key
                 break
 
+        if label_key == "income_tax":
+            in_deduction_block = True
+        elif label_key in ("refund", "net_pay"):
+            in_deduction_block = False
+
         if label_key is not None:
             if amounts:  # ラベルと金額が同じ行にあるレイアウト
                 values.setdefault(label_key, amounts[-1])
@@ -1005,12 +1042,31 @@ def parse_payroll(rows: list[list[OcrLine]], source_name: str = "") -> ParseResu
             continue
 
         if any(ig in normalized for ig in _PAYROLL_IGNORE_LABELS):
+            if "小計" in normalized:  # ⑥小計で控除金額欄が終わる
+                in_deduction_block = False
             pending = None
             continue
 
         if amounts and pending is not None:
-            values.setdefault(pending, amounts[-1])
+            if pending.startswith("other:"):
+                label = pending[len("other:"):]
+                if not other_deductions.get(label):  # 見出し行で 0 を置いてある
+                    other_deductions[label] = amounts[-1]
+            else:
+                values.setdefault(pending, amounts[-1])
             pending = None
+            continue
+
+        # 控除金額欄の見出し行（金額なし）は会社独自の控除項目として拾う
+        if in_deduction_block and not amounts:
+            label = _payroll_row_label(cells)
+            if label:
+                pending = f"other:{label}"
+                # 今月は金額なしの項目も、事前登録の一覧には載せる
+                other_deductions.setdefault(label, 0)
+
+    # 見つかった控除項目は、金額が読めなくても事前登録の一覧に載せる
+    result.deduction_labels = list(other_deductions)
 
     if "salary" not in values:
         result.warnings.append(
@@ -1047,6 +1103,27 @@ def parse_payroll(rows: list[list[OcrLine]], source_name: str = "") -> ParseResu
     add(_SHOKUCHI, "", "預り金", "住民税", values.get("resident_tax", 0), f"{month_label} 住民税")
     add(_SHOKUCHI, "", "預り金", "土建組合", values.get("dokken", 0), f"{month_label} 土建組合費")
     add(_SHOKUCHI, "", "預り金", "社員積立", values.get("tsumitate", 0), f"{month_label} 社員旅行積立")
+    # 会社独自の控除項目（駐車場代・社宅・水道光熱費・立替返済 など）
+    unmapped: list[str] = []
+    for label, amount in other_deductions.items():
+        if not amount:
+            continue
+        rule = deduction_rules.get(label)
+        if rule and rule[0]:
+            account, sub = rule[0], rule[1]
+            add(_SHOKUCHI, "", account, sub, amount, f"{month_label} {label}")
+        else:
+            add(_SHOKUCHI, "", _OTHER_DEDUCTION_DEFAULT_ACCOUNT, label, amount, f"{month_label} {label}")
+            e = result.entries[-1]
+            e.needs_review = True
+            e.note = f"控除項目「{label}」の科目が未設定（事前登録の給与の控除項目で指定）"
+            unmapped.append(label)
+    if unmapped:
+        result.warnings.append(
+            "会社独自の控除項目（" + "、".join(unmapped) + "）の勘定科目が未設定のため、"
+            f"仮に{_OTHER_DEDUCTION_DEFAULT_ACCOUNT}（補助科目＝項目名）にして要確認にしました。"
+            "事前登録の「給与の控除項目」で科目を設定すると、次回から自動で入ります。"
+        )
     add("預り金", "源泉所得税", _SHOKUCHI, "", values.get("refund", 0), f"{month_label} 源泉所得税還付")
     add(_SHOKUCHI, "", "未払費用", "給料", values.get("net_pay", 0), f"{month_label} 差引支給額")
 

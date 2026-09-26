@@ -628,7 +628,13 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
         )
     elif effective_type == "給与台帳":
         rows = group_rows(ocr_lines)
-        result = parse_payroll(rows, source_name=f.name)
+        result = parse_payroll(
+            rows, source_name=f.name, deduction_rules=storage.payroll_deduction_map(client)
+        )
+        # 台帳で見つかった会社独自の控除項目を、事前登録の一覧に加えておく
+        # （科目は空のまま。事前登録「給与の控除項目」で会計事務所が決める）
+        if result.deduction_labels:
+            storage.ensure_payroll_deductions(client, result.deduction_labels)
         preview = "\n".join(" | ".join(c.text for c in row) for row in rows)
     elif effective_type in ("通帳", "カード明細"):
         # 座標で表の行を復元してから解析する
@@ -1141,10 +1147,12 @@ def render_masters(client: str) -> None:
 
     with st.container(border=True, key="yccard7"):
         T.card_title(
-            "売掛・買掛の設定",
-            "書類タイプの紐付けと、行番号と取引先の対応。上の2つのマスタとは独立して設定できます",
+            "売掛・買掛・給与の設定",
+            "書類タイプの紐付け、行番号と取引先の対応、給与台帳の控除項目の科目。上の2つのマスタとは独立して設定できます",
         )
-        tab_doctype, tab_rowmap = st.tabs(["書類タイプの紐付け","売掛・買掛の行番号"])
+        tab_doctype, tab_rowmap, tab_payroll = st.tabs(
+            ["書類タイプの紐付け", "売掛・買掛の行番号", "給与の控除項目"]
+        )
 
     # --- 摘要辞書（摘要科目一覧）: PDFから一括登録 ---
     def _dict_summary(records: list[dict]) -> None:
@@ -1357,6 +1365,46 @@ def render_masters(client: str) -> None:
             st.session_state["sub_flash"] = f"{rowmap_choice}の対応表 {saved} 件を保存しました。"
             st.rerun()
 
+    # --- 給与台帳の控除項目→勘定科目 ---
+    with tab_payroll:
+        st.markdown(
+            "給与台帳の**控除金額欄にある会社独自の項目**（駐車場代・社宅・水道光熱費・立替返済 など）を、"
+            "どの勘定科目・補助科目に入れるかを決めます。"
+            "健康保険・厚生年金・雇用保険・所得税・住民税は自動で預り金に入るので、ここには不要です。"
+        )
+        st.caption(
+            "給与台帳を取り込むと、見つかった項目が科目空欄でここに並びます。"
+            "科目が空欄の項目は、仮に「預り金（補助科目＝項目名）」で要確認になります。"
+        )
+        _payroll_rows = storage.list_payroll_deductions(client)
+        _acct_names_pay = [r["name"] for r in _acct_master]
+        _acct_options = list(dict.fromkeys(
+            _acct_names_pay + ["預り金", "立替金", "雑収入", "受取家賃", "貸付金", "未収入金"]
+        ))
+        payroll_view = (
+            pd.DataFrame(_payroll_rows)[["label", "account", "sub_account"]]
+            .rename(columns={"label": "控除項目", "account": "勘定科目", "sub_account": "補助科目"})
+            if _payroll_rows else pd.DataFrame(columns=["控除項目", "勘定科目", "補助科目"])
+        )
+        payroll_view["勘定科目"] = payroll_view["勘定科目"].replace("", None)
+        edited_payroll = st.data_editor(
+            payroll_view, num_rows="dynamic", use_container_width=True, key="payroll_deduction_editor",
+            column_config={
+                "控除項目": st.column_config.TextColumn(help="給与台帳の見出しと同じ文字にしてください"),
+                "勘定科目": st.column_config.SelectboxColumn(options=_acct_options, help="空欄なら預り金で要確認になります"),
+                "補助科目": st.column_config.TextColumn(help="弥生の補助科目名。不要なら空欄"),
+            },
+        )
+        if st.button("控除項目を保存", key="payroll_deduction_save"):
+            records = [
+                {"label": r["控除項目"], "account": r["勘定科目"] if pd.notna(r["勘定科目"]) else "",
+                 "sub_account": r["補助科目"] if pd.notna(r["補助科目"]) else ""}
+                for _, r in edited_payroll.iterrows() if pd.notna(r["控除項目"])
+            ]
+            saved = storage.replace_payroll_deductions(client, records)
+            st.session_state["sub_flash"] = f"給与の控除項目 {saved} 件を保存しました。"
+            st.rerun()
+
 
 # =====================================================================
 # 学習ルール
@@ -1429,7 +1477,7 @@ ROLES = [
             "担当企業の書類の取り込み",
             "仕訳の編集・保存・要確認の解除",
             "事前登録のPDF登録と、登録内容の編集",
-            "売掛・買掛の設定",
+            "売掛・買掛・給与の設定",
             "一括置換とルールの学習",
             "弥生CSVの出力",
             "学習ルールの閲覧（削除は不可）",
@@ -1442,7 +1490,7 @@ ROLE_MATRIX = [
     ("作る・直す — 一般もできる", [
         ("科目一覧表・補助科目一覧・摘要科目一覧のPDF登録", True, True),
         ("登録内容の確認・編集（表の直接編集）", True, True),
-        ("売掛・買掛の設定（紐付け・行番号）", True, True),
+        ("売掛・買掛・給与の設定（紐付け・行番号・控除項目）", True, True),
         ("書類の取り込み（OCR・変換）", True, True),
         ("仕訳の編集・保存", True, True),
         ("要確認の一括解除", True, True),

@@ -865,6 +865,36 @@ def test_client_management():
         assert storage.list_clients(db_path=db) == []
 
 
+def test_payroll_deduction_storage():
+    """給与の控除項目→科目の対応は企業ごとに保存・一括置換・自動追加できる。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        assert storage.list_payroll_deductions("Kライフ", db_path=db) == []
+        # 台帳で見つかった項目は科目空欄で追加され、二重には増えない
+        assert storage.ensure_payroll_deductions("Kライフ", ["駐車場代", "社宅", "駐車場代"], db_path=db) == 2
+        assert storage.ensure_payroll_deductions("Kライフ", ["社宅", "水道光熱費"], db_path=db) == 1
+        labels = [r["label"] for r in storage.list_payroll_deductions("Kライフ", db_path=db)]
+        assert labels == ["駐車場代", "社宅", "水道光熱費"]
+        assert storage.payroll_deduction_map("Kライフ", db_path=db) == {}  # 科目未設定は含めない
+
+        saved = storage.replace_payroll_deductions("Kライフ", [
+            {"label": "駐車場代", "account": "雑収入", "sub_account": ""},
+            {"label": "社宅", "account": "受取家賃", "sub_account": "社宅"},
+            {"label": "水道光熱費", "account": "", "sub_account": ""},
+            {"label": "", "account": "雑収入", "sub_account": ""},  # 項目名なしは無視
+        ], db_path=db)
+        assert saved == 3
+        assert storage.payroll_deduction_map("Kライフ", db_path=db) == {
+            "駐車場代": ("雑収入", ""), "社宅": ("受取家賃", "社宅"),
+        }
+        # 企業ごとに独立
+        assert storage.list_payroll_deductions("別社", db_path=db) == []
+        # 企業削除で一緒に消える
+        storage.add_client("Kライフ", db_path=db)
+        storage.delete_client("Kライフ", db_path=db)
+        assert storage.list_payroll_deductions("Kライフ", db_path=db) == []
+
+
 def test_ocr_retries_after_rate_limit():
     """429 (Too Many Requests) は Retry-After 秒だけ待ってやり直す。"""
     import ocr
