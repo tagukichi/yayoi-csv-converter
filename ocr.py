@@ -77,6 +77,48 @@ class AzureOCRError(Exception):
     """OCR処理で発生したエラー。"""
 
 
+# 無料プラン(F0)は 1分あたり 20 リクエストまで。送信(analyze)も結果取得
+# (analyzeResults)も同じ枠で数えられるため、複数枚を続けて処理すると
+# HTTP 429 (Too Many Requests) が返ることがある。その場合は Azure が
+# 指定する秒数（Retry-After）だけ待って同じリクエストをやり直す。
+_RATE_LIMIT_MAX_WAIT_SEC = 120
+_RATE_LIMIT_DEFAULT_WAIT_SEC = 10
+
+# 結果取得のポーリング間隔（秒）。短い間隔で叩くほど 1分あたりの
+# リクエスト数を消費するので、待つほど間隔を広げる
+_POLL_INTERVAL_START_SEC = 2.0
+_POLL_INTERVAL_MAX_SEC = 5.0
+
+
+def _retry_after_seconds(res: requests.Response) -> float:
+    """429 応答の Retry-After ヘッダーを秒数にする（無ければ既定値）。"""
+    raw = res.headers.get("Retry-After", "")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return float(_RATE_LIMIT_DEFAULT_WAIT_SEC)
+
+
+def _request_with_rate_limit(send) -> requests.Response:
+    """send() を実行し、429 なら待ってやり直す。
+
+    合計待ち時間が _RATE_LIMIT_MAX_WAIT_SEC を超えたら諦めて例外にする。
+    """
+    waited = 0.0
+    while True:
+        res = send()
+        if res.status_code != 429:
+            return res
+        wait = _retry_after_seconds(res)
+        if waited + wait > _RATE_LIMIT_MAX_WAIT_SEC:
+            raise AzureOCRError(
+                "Azure OCR の利用上限（無料プランは1分あたり20回）に達しました。"
+                "1〜2分待ってから、残りのファイルをもう一度取り込んでください。"
+            )
+        time.sleep(wait)
+        waited += wait
+
+
 @dataclass
 class OcrLine:
     """OCRで読み取った1行（座標付き）。
@@ -118,15 +160,17 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
         raise AzureOCRError(f"ファイルサイズが上限({MAX_FILE_SIZE_MB}MB)を超えています。")
 
     analyze_url = f"{endpoint}/vision/{OCR_API_VERSION}/read/analyze"
-    res = requests.post(
-        analyze_url,
-        params={"language": language},
-        headers={
-            "Ocp-Apim-Subscription-Key": key,
-            "Content-Type": "application/octet-stream",
-        },
-        data=file_bytes,
-        timeout=30,
+    res = _request_with_rate_limit(
+        lambda: requests.post(
+            analyze_url,
+            params={"language": language},
+            headers={
+                "Ocp-Apim-Subscription-Key": key,
+                "Content-Type": "application/octet-stream",
+            },
+            data=file_bytes,
+            timeout=30,
+        )
     )
     if res.status_code != 202:
         if "InvalidImageSize" in res.text or "too large" in res.text:
@@ -139,12 +183,18 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
 
     operation_url = res.headers["Operation-Location"]
     deadline = time.time() + timeout_sec
+    interval = _POLL_INTERVAL_START_SEC
 
     while True:
-        poll = requests.get(
-            operation_url,
-            headers={"Ocp-Apim-Subscription-Key": key},
-            timeout=30,
+        # 送信直後はまだ結果がないので、先に待ってから取りに行く
+        time.sleep(interval)
+        interval = min(interval + 1.0, _POLL_INTERVAL_MAX_SEC)
+        poll = _request_with_rate_limit(
+            lambda: requests.get(
+                operation_url,
+                headers={"Ocp-Apim-Subscription-Key": key},
+                timeout=30,
+            )
         )
         poll.raise_for_status()
         result = poll.json()
@@ -156,7 +206,6 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
             raise AzureOCRError("OCR処理が失敗しました。ファイル形式・内容を確認してください。")
         if time.time() > deadline:
             raise AzureOCRError("OCR処理がタイムアウトしました。")
-        time.sleep(1)
 
 
 def run_ocr(file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120) -> list[str]:

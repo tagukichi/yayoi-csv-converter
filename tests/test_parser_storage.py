@@ -865,6 +865,36 @@ def test_client_management():
         assert storage.list_clients(db_path=db) == []
 
 
+def test_ocr_retries_after_rate_limit():
+    """429 (Too Many Requests) は Retry-After 秒だけ待ってやり直す。"""
+    import ocr
+
+    class _Res:
+        def __init__(self, status, retry_after=None):
+            self.status_code = status
+            self.headers = {"Retry-After": str(retry_after)} if retry_after else {}
+
+    sleeps: list[float] = []
+    orig_sleep = ocr.time.sleep
+    ocr.time.sleep = sleeps.append
+    try:
+        responses = [_Res(429, 3), _Res(429), _Res(200)]
+        res = ocr._request_with_rate_limit(lambda: responses.pop(0))
+        assert res.status_code == 200
+        assert sleeps == [3.0, float(ocr._RATE_LIMIT_DEFAULT_WAIT_SEC)]
+
+        # 待ち時間の合計が上限を超えたら諦めて分かりやすいエラーにする
+        sleeps.clear()
+        try:
+            ocr._request_with_rate_limit(lambda: _Res(429, 100))
+            raise AssertionError("AzureOCRError が出るはず")
+        except ocr.AzureOCRError as e:
+            assert "利用上限" in str(e)
+        assert sleeps == [100.0]
+    finally:
+        ocr.time.sleep = orig_sleep
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):
