@@ -895,6 +895,38 @@ def test_ocr_retries_after_rate_limit():
         ocr.time.sleep = orig_sleep
 
 
+def test_ocr_lines_rotated_page_is_uprighted():
+    """横向きに撮った通帳（文字が90度回転）でも行・列を正しく復元する。"""
+    from ocr import group_rows, lines_from_read_results
+
+    # 正立した通帳の座標（幅 W=1000, 高さ H=600）。1行 = 日付・摘要・金額・残高
+    upright = [
+        [("04.03.22", 20, 100), ("決算利息", 200, 100), ("3", 600, 100), ("351,009", 800, 100)],
+        [("04.04.25", 20, 150), ("自動機提携", 200, 150), ("116,000", 600, 150), ("467,009", 800, 150)],
+        [("04.05.31", 20, 200), ("自動機提携", 200, 200), ("143,000", 600, 200), ("610,009", 800, 200)],
+    ]
+    H = 600
+    cell_w, cell_h = 120, 30
+
+    def build(rotate: bool) -> list[dict]:
+        lines = []
+        for row in upright:
+            for text, x, y in row:
+                # 文字の向きで見た左上→右上→右下→左下
+                corners = [(x, y), (x + cell_w, y), (x + cell_w, y + cell_h), (x, y + cell_h)]
+                if rotate:
+                    # 画像を時計回りに90度回す: (x, y) → (H - y, x)
+                    corners = [(H - cy, cx) for cx, cy in corners]
+                box = [v for pt in corners for v in pt]
+                lines.append({"text": text, "boundingBox": box})
+        return [{"page": 1, "lines": lines}]
+
+    expected = [[c[0] for c in row] for row in upright]
+    for rotate in (False, True):
+        rows = group_rows(lines_from_read_results(build(rotate)))
+        assert [[c.text for c in r] for r in rows] == expected, (rotate, rows)
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):

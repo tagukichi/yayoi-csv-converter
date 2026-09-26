@@ -9,6 +9,7 @@ split_text_clusters() で空間的なかたまりに分割できる。
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import time
@@ -213,17 +214,61 @@ def run_ocr(file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120) 
     return [line.text for line in run_ocr_lines(file_bytes, language=language, timeout_sec=timeout_sec)]
 
 
-def run_ocr_lines(
-    file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120
-) -> list[OcrLine]:
-    """OCRを実行し、座標付きの行リストを返す。"""
-    analyze_result = _analyze(file_bytes, language, timeout_sec)
+# これより大きく傾いた（横向きに撮った）ページは座標を回して正立させる
+_ROTATE_THRESHOLD_DEG = 30.0
+
+
+def _text_direction(boxes: list[list[float]]) -> float:
+    """ページ内のテキストが読まれる向き（ラジアン）を求める。
+
+    Azure の boundingBox は「文字の向きで見た左上」から時計回りに
+    四隅が並ぶので、1点目→2点目のベクトルが行の読み方向になる。
+    全行の向きを単位ベクトルの合計で平均し（-180°/180° の境目でも
+    崩れない）、正立していればほぼ 0 になる。
+    """
+    sx = sy = 0.0
+    for box in boxes:
+        dx, dy = box[2] - box[0], box[3] - box[1]
+        norm = math.hypot(dx, dy)
+        if norm > 0:
+            sx += dx / norm
+            sy += dy / norm
+    if sx == 0 and sy == 0:
+        return 0.0
+    return math.atan2(sy, sx)
+
+
+def _rotate_points(box: list[float], theta: float) -> tuple[list[float], list[float]]:
+    """四隅の座標を -theta 回して、テキストが左→右に読める向きにする。"""
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    xs: list[float] = []
+    ys: list[float] = []
+    for x, y in zip(box[0::2], box[1::2]):
+        xs.append(x * cos_t + y * sin_t)
+        ys.append(-x * sin_t + y * cos_t)
+    return xs, ys
+
+
+def lines_from_read_results(read_results: list[dict]) -> list[OcrLine]:
+    """Read API の readResults を座標付きの行リストにする。
+
+    通帳を横向きに撮った写真のようにテキストが90度回転していると、
+    そのままの座標では通帳の「行」が画像の「列」になり、表の復元
+    （group_rows）が崩れる。ページ全体の文字の向きを調べ、大きく
+    傾いていれば座標を回して正立させてから行にする。
+    """
     lines: list[OcrLine] = []
-    for page_no, page in enumerate(analyze_result["readResults"], start=1):
-        for line in page["lines"]:
-            # boundingBox は四隅の [x1,y1, x2,y2, x3,y3, x4,y4]
-            box = line["boundingBox"]
-            xs, ys = box[0::2], box[1::2]
+    for page_no, page in enumerate(read_results, start=1):
+        # boundingBox は四隅の [x1,y1, x2,y2, x3,y3, x4,y4]
+        boxes = [line["boundingBox"] for line in page["lines"]]
+        theta = _text_direction(boxes)
+        if abs(math.degrees(theta)) < _ROTATE_THRESHOLD_DEG:
+            theta = 0.0
+        for line, box in zip(page["lines"], boxes):
+            if theta:
+                xs, ys = _rotate_points(box, theta)
+            else:
+                xs, ys = box[0::2], box[1::2]
             lines.append(
                 OcrLine(
                     text=line["text"],
@@ -235,6 +280,14 @@ def run_ocr_lines(
                 )
             )
     return lines
+
+
+def run_ocr_lines(
+    file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120
+) -> list[OcrLine]:
+    """OCRを実行し、座標付きの行リストを返す。"""
+    analyze_result = _analyze(file_bytes, language, timeout_sec)
+    return lines_from_read_results(analyze_result["readResults"])
 
 
 def group_rows(lines: list[OcrLine]) -> list[list[OcrLine]]:
