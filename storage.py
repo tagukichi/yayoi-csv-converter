@@ -118,6 +118,21 @@ CREATE TABLE IF NOT EXISTS doctype_rules (
 )
 """
 
+# 給与台帳の会社独自の控除項目（駐車場代・社宅・水道光熱費・立替返済 等）
+# → 勘定科目・補助科目の対応（クライアント別）。account が空の行は
+# 「台帳で見つかったが科目未設定」の状態。
+_CREATE_PAYROLL_DEDUCTIONS_SQL = """
+CREATE TABLE IF NOT EXISTS payroll_deductions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    label TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT '',
+    sub_account TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, label)
+)
+"""
+
 # 売掛表・買掛表の「行番号 → 取引先名」の対応（クライアント別）。
 # side: sales=売掛表（売上）, purchase=買掛表
 _CREATE_PARTNER_ROWS_SQL = """
@@ -285,6 +300,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_ACCOUNT_MASTER_SQL)
     conn.execute(_CREATE_DOCTYPE_RULES_SQL)
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
+    conn.execute(_CREATE_PAYROLL_DEDUCTIONS_SQL)
     conn.execute(_CREATE_DESC_DICT_SQL)
     conn.execute(_CREATE_MASTER_META_SQL)
     conn.execute(_CREATE_CLIENT_PREFS_SQL)
@@ -338,7 +354,8 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
 # 企業ごとに持っているデータ（企業を消すときはまとめて消す）
 _CLIENT_TABLES = (
     "entries", "subaccounts", "account_master", "desc_dict",
-    "desc_rules", "doctype_rules", "partner_rows", "master_meta", "client_prefs",
+    "desc_rules", "doctype_rules", "partner_rows", "payroll_deductions",
+    "master_meta", "client_prefs",
 )
 
 
@@ -952,6 +969,82 @@ def set_doctype_rule(
             (record["client"], record["doc_type"], record["debit_account"],
              record["credit_account"], record["sub_side"]),
         )
+
+
+# --- 給与台帳の控除項目→勘定科目の対応（クライアント別） ---
+
+
+def list_payroll_deductions(client: str, db_path: Path = DB_PATH) -> list[dict]:
+    """控除項目の一覧を返す（登録順）。account が空なら科目未設定。"""
+    if _supabase_enabled(db_path):
+        return (
+            _sb().table("payroll_deductions").select("*")
+            .eq("client", client).order("id").execute().data
+        )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, label, account, sub_account FROM payroll_deductions
+               WHERE client = ? ORDER BY id""",
+            (client,),
+        ).fetchall()
+    return [{"id": r[0], "label": r[1], "account": r[2], "sub_account": r[3]} for r in rows]
+
+
+def payroll_deduction_map(client: str, db_path: Path = DB_PATH) -> dict[str, tuple[str, str]]:
+    """parse_payroll に渡す形（項目名 → (勘定科目, 補助科目)）。科目未設定は含めない。"""
+    return {
+        r["label"]: (r["account"], r["sub_account"])
+        for r in list_payroll_deductions(client, db_path)
+        if r["account"]
+    }
+
+
+def ensure_payroll_deductions(client: str, labels: list[str], db_path: Path = DB_PATH) -> int:
+    """台帳で見つかった控除項目を、未登録なら科目空欄で一覧に加える。追加件数を返す。"""
+    existing = {r["label"] for r in list_payroll_deductions(client, db_path)}
+    new_labels = list(dict.fromkeys(l.strip() for l in labels if l.strip() and l.strip() not in existing))
+    if not new_labels:
+        return 0
+    records = [{"client": client, "label": l, "account": "", "sub_account": ""} for l in new_labels]
+    if _supabase_enabled(db_path):
+        _sb().table("payroll_deductions").insert(records).execute()
+        return len(records)
+    with _connect(db_path) as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO payroll_deductions (client, label) VALUES (?, ?)",
+            [(client, l) for l in new_labels],
+        )
+    return len(records)
+
+
+def replace_payroll_deductions(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:
+    """控除項目→科目の対応を一括で置き換える。登録件数を返す。"""
+    seen: set[str] = set()
+    cleaned = []
+    for r in records:
+        label = str(r.get("label", "") or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        cleaned.append({
+            "client": client,
+            "label": label,
+            "account": str(r.get("account", "") or "").strip(),
+            "sub_account": str(r.get("sub_account", "") or "").strip(),
+        })
+    if _supabase_enabled(db_path):
+        _sb().table("payroll_deductions").delete().eq("client", client).execute()
+        if cleaned:
+            _sb().table("payroll_deductions").insert(cleaned).execute()
+        return len(cleaned)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM payroll_deductions WHERE client = ?", (client,))
+        conn.executemany(
+            """INSERT INTO payroll_deductions (client, label, account, sub_account)
+               VALUES (?, ?, ?, ?)""",
+            [(c["client"], c["label"], c["account"], c["sub_account"]) for c in cleaned],
+        )
+    return len(cleaned)
 
 
 # --- 売掛表・買掛表の行番号→取引先の対応（クライアント別） ---

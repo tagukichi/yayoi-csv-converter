@@ -9,6 +9,7 @@ split_text_clusters() で空間的なかたまりに分割できる。
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import time
@@ -77,6 +78,48 @@ class AzureOCRError(Exception):
     """OCR処理で発生したエラー。"""
 
 
+# 無料プラン(F0)は 1分あたり 20 リクエストまで。送信(analyze)も結果取得
+# (analyzeResults)も同じ枠で数えられるため、複数枚を続けて処理すると
+# HTTP 429 (Too Many Requests) が返ることがある。その場合は Azure が
+# 指定する秒数（Retry-After）だけ待って同じリクエストをやり直す。
+_RATE_LIMIT_MAX_WAIT_SEC = 120
+_RATE_LIMIT_DEFAULT_WAIT_SEC = 10
+
+# 結果取得のポーリング間隔（秒）。短い間隔で叩くほど 1分あたりの
+# リクエスト数を消費するので、待つほど間隔を広げる
+_POLL_INTERVAL_START_SEC = 2.0
+_POLL_INTERVAL_MAX_SEC = 5.0
+
+
+def _retry_after_seconds(res: requests.Response) -> float:
+    """429 応答の Retry-After ヘッダーを秒数にする（無ければ既定値）。"""
+    raw = res.headers.get("Retry-After", "")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return float(_RATE_LIMIT_DEFAULT_WAIT_SEC)
+
+
+def _request_with_rate_limit(send) -> requests.Response:
+    """send() を実行し、429 なら待ってやり直す。
+
+    合計待ち時間が _RATE_LIMIT_MAX_WAIT_SEC を超えたら諦めて例外にする。
+    """
+    waited = 0.0
+    while True:
+        res = send()
+        if res.status_code != 429:
+            return res
+        wait = _retry_after_seconds(res)
+        if waited + wait > _RATE_LIMIT_MAX_WAIT_SEC:
+            raise AzureOCRError(
+                "Azure OCR の利用上限（無料プランは1分あたり20回）に達しました。"
+                "1〜2分待ってから、残りのファイルをもう一度取り込んでください。"
+            )
+        time.sleep(wait)
+        waited += wait
+
+
 @dataclass
 class OcrLine:
     """OCRで読み取った1行（座標付き）。
@@ -118,15 +161,17 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
         raise AzureOCRError(f"ファイルサイズが上限({MAX_FILE_SIZE_MB}MB)を超えています。")
 
     analyze_url = f"{endpoint}/vision/{OCR_API_VERSION}/read/analyze"
-    res = requests.post(
-        analyze_url,
-        params={"language": language},
-        headers={
-            "Ocp-Apim-Subscription-Key": key,
-            "Content-Type": "application/octet-stream",
-        },
-        data=file_bytes,
-        timeout=30,
+    res = _request_with_rate_limit(
+        lambda: requests.post(
+            analyze_url,
+            params={"language": language},
+            headers={
+                "Ocp-Apim-Subscription-Key": key,
+                "Content-Type": "application/octet-stream",
+            },
+            data=file_bytes,
+            timeout=30,
+        )
     )
     if res.status_code != 202:
         if "InvalidImageSize" in res.text or "too large" in res.text:
@@ -139,12 +184,18 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
 
     operation_url = res.headers["Operation-Location"]
     deadline = time.time() + timeout_sec
+    interval = _POLL_INTERVAL_START_SEC
 
     while True:
-        poll = requests.get(
-            operation_url,
-            headers={"Ocp-Apim-Subscription-Key": key},
-            timeout=30,
+        # 送信直後はまだ結果がないので、先に待ってから取りに行く
+        time.sleep(interval)
+        interval = min(interval + 1.0, _POLL_INTERVAL_MAX_SEC)
+        poll = _request_with_rate_limit(
+            lambda: requests.get(
+                operation_url,
+                headers={"Ocp-Apim-Subscription-Key": key},
+                timeout=30,
+            )
         )
         poll.raise_for_status()
         result = poll.json()
@@ -156,7 +207,6 @@ def _analyze(file_bytes: bytes, language: str, timeout_sec: int) -> dict:
             raise AzureOCRError("OCR処理が失敗しました。ファイル形式・内容を確認してください。")
         if time.time() > deadline:
             raise AzureOCRError("OCR処理がタイムアウトしました。")
-        time.sleep(1)
 
 
 def run_ocr(file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120) -> list[str]:
@@ -164,17 +214,61 @@ def run_ocr(file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120) 
     return [line.text for line in run_ocr_lines(file_bytes, language=language, timeout_sec=timeout_sec)]
 
 
-def run_ocr_lines(
-    file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120
-) -> list[OcrLine]:
-    """OCRを実行し、座標付きの行リストを返す。"""
-    analyze_result = _analyze(file_bytes, language, timeout_sec)
+# これより大きく傾いた（横向きに撮った）ページは座標を回して正立させる
+_ROTATE_THRESHOLD_DEG = 30.0
+
+
+def _text_direction(boxes: list[list[float]]) -> float:
+    """ページ内のテキストが読まれる向き（ラジアン）を求める。
+
+    Azure の boundingBox は「文字の向きで見た左上」から時計回りに
+    四隅が並ぶので、1点目→2点目のベクトルが行の読み方向になる。
+    全行の向きを単位ベクトルの合計で平均し（-180°/180° の境目でも
+    崩れない）、正立していればほぼ 0 になる。
+    """
+    sx = sy = 0.0
+    for box in boxes:
+        dx, dy = box[2] - box[0], box[3] - box[1]
+        norm = math.hypot(dx, dy)
+        if norm > 0:
+            sx += dx / norm
+            sy += dy / norm
+    if sx == 0 and sy == 0:
+        return 0.0
+    return math.atan2(sy, sx)
+
+
+def _rotate_points(box: list[float], theta: float) -> tuple[list[float], list[float]]:
+    """四隅の座標を -theta 回して、テキストが左→右に読める向きにする。"""
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    xs: list[float] = []
+    ys: list[float] = []
+    for x, y in zip(box[0::2], box[1::2]):
+        xs.append(x * cos_t + y * sin_t)
+        ys.append(-x * sin_t + y * cos_t)
+    return xs, ys
+
+
+def lines_from_read_results(read_results: list[dict]) -> list[OcrLine]:
+    """Read API の readResults を座標付きの行リストにする。
+
+    通帳を横向きに撮った写真のようにテキストが90度回転していると、
+    そのままの座標では通帳の「行」が画像の「列」になり、表の復元
+    （group_rows）が崩れる。ページ全体の文字の向きを調べ、大きく
+    傾いていれば座標を回して正立させてから行にする。
+    """
     lines: list[OcrLine] = []
-    for page_no, page in enumerate(analyze_result["readResults"], start=1):
-        for line in page["lines"]:
-            # boundingBox は四隅の [x1,y1, x2,y2, x3,y3, x4,y4]
-            box = line["boundingBox"]
-            xs, ys = box[0::2], box[1::2]
+    for page_no, page in enumerate(read_results, start=1):
+        # boundingBox は四隅の [x1,y1, x2,y2, x3,y3, x4,y4]
+        boxes = [line["boundingBox"] for line in page["lines"]]
+        theta = _text_direction(boxes)
+        if abs(math.degrees(theta)) < _ROTATE_THRESHOLD_DEG:
+            theta = 0.0
+        for line, box in zip(page["lines"], boxes):
+            if theta:
+                xs, ys = _rotate_points(box, theta)
+            else:
+                xs, ys = box[0::2], box[1::2]
             lines.append(
                 OcrLine(
                     text=line["text"],
@@ -186,6 +280,14 @@ def run_ocr_lines(
                 )
             )
     return lines
+
+
+def run_ocr_lines(
+    file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120
+) -> list[OcrLine]:
+    """OCRを実行し、座標付きの行リストを返す。"""
+    analyze_result = _analyze(file_bytes, language, timeout_sec)
+    return lines_from_read_results(analyze_result["readResults"])
 
 
 def group_rows(lines: list[OcrLine]) -> list[list[OcrLine]]:

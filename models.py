@@ -53,6 +53,8 @@ class ParseResult:
 
     entries: list[JournalEntry] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 給与台帳で見つかった会社独自の控除項目名（事前登録の一覧に自動追加する）
+    deduction_labels: list[str] = field(default_factory=list)
 
     @property
     def needs_review_count(self) -> int:

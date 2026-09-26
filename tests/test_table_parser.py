@@ -317,6 +317,77 @@ def test_payroll_ledger():
     assert not any("諸口" in w for w in result.warnings)
 
 
+def test_payroll_company_specific_deductions():
+    """控除金額欄の会社独自の項目（駐車場代・社宅・水道光熱費・立替返済）を拾う。
+
+    項目名は会社ごとに違うので固定せず、所得税〜⑥小計の間の見出しを
+    すべて控除として扱う。科目は事前登録の対応表から、未設定なら
+    預り金（補助科目＝項目名）で要確認にする。
+    """
+    from doc_parser import parse_payroll
+
+    def label_row(y, label):
+        return _row(y, *[(10 + i * 60, label) for i in range(3)])
+
+    def amount_row(y, *amounts):
+        return _row(y, *[(10 + i * 60, a) for i, a in enumerate(amounts)])
+
+    rows = [
+        _row(10, (10, "令和8年（2026年）度給与"), (200, "給与台帳")),
+        _row(40, (10, "支給月分"), (70, "10月"), (130, "10月"), (190, "合計")),
+        label_row(90, "①月例給与計"),
+        amount_row(100, "300,000", "250,000", "550,000"),
+        label_row(150, "健康保険"),
+        amount_row(160, "15,000", "12,000", "27,000"),
+        label_row(210, "④小計"),
+        amount_row(220, "15,000", "12,000", "27,000"),
+        label_row(230, "⑤差引控除後の金額①－④"),
+        amount_row(240, "285,000", "238,000", "523,000"),
+        label_row(250, "所得税"),
+        amount_row(260, "8,000", "5,000", "13,000"),
+        label_row(270, "市民村民税"),
+        amount_row(280, "10,000", "7,000", "17,000"),
+        label_row(290, "駐車場代"),
+        amount_row(300, "5,000", "5,000", "10,000"),
+        # 縦書きの区分見出し「控除金額」が同じ行に混ざっても項目名にしない
+        _row(310, (2, "控除"), (10, "社宅"), (70, "社宅"), (130, "社宅")),
+        amount_row(320, "30,000", "", "30,000"),
+        label_row(330, "水道光熱費"),
+        amount_row(340, "4,000", "3,000", "7,000"),
+        label_row(350, "立替返済"),  # 金額なし → 出ない
+        label_row(360, "⑥小計"),
+        amount_row(370, "57,000", "20,000", "77,000"),
+        label_row(380, "⑦源泉所得税還付金"),
+        label_row(390, "差引支給額③－④－⑥＋⑦"),
+        amount_row(400, "228,000", "218,000", "446,000"),
+    ]
+
+    # 事前登録なし → 預り金（補助科目＝項目名）で要確認
+    result = parse_payroll(rows)
+    by_desc = {e.description: e for e in result.entries}
+    assert result.deduction_labels == ["駐車場代", "社宅", "水道光熱費", "立替返済"]
+    park = by_desc["10月分給与 駐車場代"]
+    assert (park.debit_account, park.credit_account, park.credit_sub, park.amount) == ("諸口", "預り金", "駐車場代", 10000)
+    assert park.needs_review and "駐車場代" in park.note
+    assert by_desc["10月分給与 社宅"].amount == 30000
+    assert by_desc["10月分給与 水道光熱費"].amount == 7000
+    assert "10月分給与 立替返済" not in by_desc
+    assert by_desc["10月分給与"].date == date(2026, 10, 31)
+    # 控除を拾えているので諸口は一致する（全行要確認にはならない）
+    assert not any("諸口の貸借" in w for w in result.warnings)
+    assert any("駐車場代" in w and "未設定" in w for w in result.warnings)
+    assert by_desc["10月分給与 差引支給額"].needs_review is False
+
+    # 事前登録あり → 指定の科目・補助科目で、要確認にならない
+    rules = {"駐車場代": ("雑収入", ""), "社宅": ("受取家賃", "社宅"), "水道光熱費": ("立替金", "")}
+    result = parse_payroll(rows, deduction_rules=rules)
+    by_desc = {e.description: e for e in result.entries}
+    park = by_desc["10月分給与 駐車場代"]
+    assert (park.credit_account, park.credit_sub, park.needs_review) == ("雑収入", "", False)
+    assert (by_desc["10月分給与 社宅"].credit_account, by_desc["10月分給与 社宅"].credit_sub) == ("受取家賃", "社宅")
+    assert not any("未設定" in w for w in result.warnings)
+
+
 def test_payroll_ledger_imbalance_flagged():
     """諸口の貸借が合わない（読み取り誤り想定）場合は全行要確認。"""
     from doc_parser import parse_payroll

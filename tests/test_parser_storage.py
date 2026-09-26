@@ -865,6 +865,98 @@ def test_client_management():
         assert storage.list_clients(db_path=db) == []
 
 
+def test_payroll_deduction_storage():
+    """給与の控除項目→科目の対応は企業ごとに保存・一括置換・自動追加できる。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        assert storage.list_payroll_deductions("Kライフ", db_path=db) == []
+        # 台帳で見つかった項目は科目空欄で追加され、二重には増えない
+        assert storage.ensure_payroll_deductions("Kライフ", ["駐車場代", "社宅", "駐車場代"], db_path=db) == 2
+        assert storage.ensure_payroll_deductions("Kライフ", ["社宅", "水道光熱費"], db_path=db) == 1
+        labels = [r["label"] for r in storage.list_payroll_deductions("Kライフ", db_path=db)]
+        assert labels == ["駐車場代", "社宅", "水道光熱費"]
+        assert storage.payroll_deduction_map("Kライフ", db_path=db) == {}  # 科目未設定は含めない
+
+        saved = storage.replace_payroll_deductions("Kライフ", [
+            {"label": "駐車場代", "account": "雑収入", "sub_account": ""},
+            {"label": "社宅", "account": "受取家賃", "sub_account": "社宅"},
+            {"label": "水道光熱費", "account": "", "sub_account": ""},
+            {"label": "", "account": "雑収入", "sub_account": ""},  # 項目名なしは無視
+        ], db_path=db)
+        assert saved == 3
+        assert storage.payroll_deduction_map("Kライフ", db_path=db) == {
+            "駐車場代": ("雑収入", ""), "社宅": ("受取家賃", "社宅"),
+        }
+        # 企業ごとに独立
+        assert storage.list_payroll_deductions("別社", db_path=db) == []
+        # 企業削除で一緒に消える
+        storage.add_client("Kライフ", db_path=db)
+        storage.delete_client("Kライフ", db_path=db)
+        assert storage.list_payroll_deductions("Kライフ", db_path=db) == []
+
+
+def test_ocr_retries_after_rate_limit():
+    """429 (Too Many Requests) は Retry-After 秒だけ待ってやり直す。"""
+    import ocr
+
+    class _Res:
+        def __init__(self, status, retry_after=None):
+            self.status_code = status
+            self.headers = {"Retry-After": str(retry_after)} if retry_after else {}
+
+    sleeps: list[float] = []
+    orig_sleep = ocr.time.sleep
+    ocr.time.sleep = sleeps.append
+    try:
+        responses = [_Res(429, 3), _Res(429), _Res(200)]
+        res = ocr._request_with_rate_limit(lambda: responses.pop(0))
+        assert res.status_code == 200
+        assert sleeps == [3.0, float(ocr._RATE_LIMIT_DEFAULT_WAIT_SEC)]
+
+        # 待ち時間の合計が上限を超えたら諦めて分かりやすいエラーにする
+        sleeps.clear()
+        try:
+            ocr._request_with_rate_limit(lambda: _Res(429, 100))
+            raise AssertionError("AzureOCRError が出るはず")
+        except ocr.AzureOCRError as e:
+            assert "利用上限" in str(e)
+        assert sleeps == [100.0]
+    finally:
+        ocr.time.sleep = orig_sleep
+
+
+def test_ocr_lines_rotated_page_is_uprighted():
+    """横向きに撮った通帳（文字が90度回転）でも行・列を正しく復元する。"""
+    from ocr import group_rows, lines_from_read_results
+
+    # 正立した通帳の座標（幅 W=1000, 高さ H=600）。1行 = 日付・摘要・金額・残高
+    upright = [
+        [("04.03.22", 20, 100), ("決算利息", 200, 100), ("3", 600, 100), ("351,009", 800, 100)],
+        [("04.04.25", 20, 150), ("自動機提携", 200, 150), ("116,000", 600, 150), ("467,009", 800, 150)],
+        [("04.05.31", 20, 200), ("自動機提携", 200, 200), ("143,000", 600, 200), ("610,009", 800, 200)],
+    ]
+    H = 600
+    cell_w, cell_h = 120, 30
+
+    def build(rotate: bool) -> list[dict]:
+        lines = []
+        for row in upright:
+            for text, x, y in row:
+                # 文字の向きで見た左上→右上→右下→左下
+                corners = [(x, y), (x + cell_w, y), (x + cell_w, y + cell_h), (x, y + cell_h)]
+                if rotate:
+                    # 画像を時計回りに90度回す: (x, y) → (H - y, x)
+                    corners = [(H - cy, cx) for cx, cy in corners]
+                box = [v for pt in corners for v in pt]
+                lines.append({"text": text, "boundingBox": box})
+        return [{"page": 1, "lines": lines}]
+
+    expected = [[c[0] for c in row] for row in upright]
+    for rotate in (False, True):
+        rows = group_rows(lines_from_read_results(build(rotate)))
+        assert [[c.text for c in r] for r in rows] == expected, (rotate, rows)
+
+
 def _run():
     passed = 0
     for name, fn in sorted(globals().items()):

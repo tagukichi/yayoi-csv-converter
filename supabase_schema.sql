@@ -92,6 +92,18 @@ create table if not exists doctype_rules (
   unique (client, doc_type)
 );
 
+-- 給与台帳の会社独自の控除項目（駐車場代・社宅・水道光熱費・立替返済 等）
+-- → 勘定科目・補助科目の対応（クライアント別）。account が空 = 科目未設定
+create table if not exists payroll_deductions (
+  id bigint generated always as identity primary key,
+  client text not null,
+  label text not null,
+  account text not null default '',
+  sub_account text not null default '',
+  created_at timestamptz not null default now(),
+  unique (client, label)
+);
+
 -- 売掛表・買掛表の「行番号 → 取引先名」の対応（クライアント別）
 -- side: sales=売掛表（売上）, purchase=買掛表
 create table if not exists partner_rows (
@@ -161,5 +173,6 @@ alter table desc_rules     enable row level security;
 alter table account_rules  enable row level security;
 alter table doctype_rules  enable row level security;
 alter table partner_rows   enable row level security;
+alter table payroll_deductions enable row level security;
 alter table master_meta    enable row level security;
 alter table client_prefs   enable row level security;
