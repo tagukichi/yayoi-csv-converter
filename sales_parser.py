@@ -80,11 +80,19 @@ def default_doctype_rule(doc_type: str, account_names: list[str] | None = None) 
 # --- 共通ヘルパ ---
 
 _AMOUNT_RE = re.compile(r"^[+-]?\d+(?:\.0+)?$")
+# 金額の前後に付く飾り: 通貨記号・円・末尾の「－」「※」など
+_AMOUNT_DECOR = re.compile(r"^[¥￥*※\s]+|[\s円\-－―ー*※]+$")
+# 文中の金額（「130, 900」のように桁区切りの後に空白が入るOCR結果も拾う）
+_EMBEDDED_AMOUNT_RE = re.compile(r"\d{1,3}(?:[,，]\s?\d{3})+|\d+")
 
 
 def _to_amount(cell: str) -> int | None:
-    """セル文字列を金額（円・整数）にする。数値でなければ None。"""
+    """セル文字列を金額（円・整数）にする。数値でなければ None。
+
+    「¥ 130,900－」「5,500 円」「130, 900」のような請求書の印字にも対応。
+    """
     s = unicodedata.normalize("NFKC", str(cell)).strip()
+    s = _AMOUNT_DECOR.sub("", s)
     s = s.replace(",", "").replace("¥", "").replace("円", "").replace(" ", "")
     if not s or not _AMOUNT_RE.fullmatch(s):
         return None
@@ -112,23 +120,43 @@ def _month_end(year: int, month: int) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
 
 
+def _date_in_text(text: str) -> date | None:
+    """テキスト中の最初の日付（令和・西暦）を返す。"""
+    m = _REIWA_DATE.search(text)
+    if m:
+        try:
+            return date(2018 + int(m.group(1)), int(m.group(2)), int(m.group(3)))  # 令和1年=2019
+        except ValueError:
+            pass
+    m = _WESTERN_DATE.search(text)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
+
+# 「請求日」「請求年月日」「発行日」の付いた日付を最優先する（請求対象期間の
+# 日付や納品日が先に印字されている請求書があるため）
+_DATE_LABELS = ("請求年月日", "請求日", "発行日")
+
+
 def _find_document_date(rows: list[list[str]]) -> date | None:
-    """行を連結したテキストから書類の日付を探す（令和・西暦）。"""
-    for row in rows[:40]:
+    """書類の日付を探す。請求日ラベル付き（同じ行→次の行）を優先し、
+    無ければ最初に見つかった日付。"""
+    head = rows[:40]
+    for i, row in enumerate(head):
         joined = "".join(row)
-        m = _REIWA_DATE.search(joined)
-        if m:
-            year = 2018 + int(m.group(1))  # 令和1年=2019
-            try:
-                return date(year, int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                continue
-        m = _WESTERN_DATE.search(joined)
-        if m:
-            try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                continue
+        if any(lbl in joined for lbl in _DATE_LABELS):
+            for cand in (joined, "".join(head[i + 1]) if i + 1 < len(head) else ""):
+                d = _date_in_text(cand)
+                if d:
+                    return d
+    for row in head:
+        d = _date_in_text("".join(row))
+        if d:
+            return d
     return None
 
 
@@ -308,10 +336,24 @@ def parse_partner_ledger(
 
 # --- 請求書（売上・仕入） ---
 
-_COMPANY_MARKERS = ("株式会社", "有限会社", "合同会社", "㈱", "㈲", "(株)", "(有)")
-_INVOICE_TOTAL_LABELS = ("当月合計",)
+_COMPANY_MARKERS = (
+    "株式会社", "有限会社", "合同会社", "合資会社", "㈱", "㈲", "(株)", "(有)",
+    "医療法人", "社会福祉法人", "一般社団法人", "公益社団法人", "一般財団法人",
+    "公益財団法人", "学校法人", "宗教法人", "協同組合", "税理士法人", "弁護士法人",
+    "司法書士法人", "行政書士法人", "社会保険労務士法人",
+)
+# 当月分の税抜額（これに消費税を足すと当月の税込額）
+_INVOICE_BASE_LABELS = ("当月合計額", "税抜今回お買上", "今回お買上高(税抜)", "税抜金額", "税抜合計")
+# 当月分の税込額（そのまま仕訳の金額になる）
+_INVOICE_TAXINCL_LABELS = ("当月合計金額", "税込今回お買上", "今回お買上高(税込)", "税込合計")
 _INVOICE_TAX_LABEL = "消費税"
-_INVOICE_BILLED_LABELS = ("請求金額", "ご請求金額", "御請求金額", "今回請求額")
+# 請求額（前月繰越や入金額を含むことがあるので、当月分が読めないときの代用）
+_INVOICE_BILLED_LABELS = (
+    "今回ご請求高", "今回御請求高", "今回ご請求額", "今回御請求額", "今回請求額",
+    "御請求金額", "ご請求金額", "請求金額合計", "合計金額", "請求金額", "ご請求額", "御請求額",
+)
+# 前月分や入金など、請求額に混ざる当月分以外の金額
+_INVOICE_CARRY_LABELS = ("前月繰越", "繰越高", "繰越金額", "前回ご請求", "前回御請求", "ご入金高", "入金額", "当月入金")
 
 
 def _find_addressee(rows: list[list[str]]) -> str:
@@ -346,18 +388,27 @@ def _find_issuer(rows: list[list[str]], exclude: str) -> str:
     return ""
 
 
-def _collect_label_amounts(rows: list[list[str]], label: str) -> list[int]:
+def _collect_label_amounts(
+    rows: list[list[str]], label: str, cell_xs: list[list[float]] | None = None
+) -> list[int]:
     """ラベルを含むセルの金額を集める。同セル内の後続数値 → 右のセル →
-    直下1〜3行の同じ列近傍、の順で探す。"""
+    直下1〜3行の同じ列、の順で探す。
+
+    cell_xs（OCRの各セルのX座標）があれば、直下の行では見出しの真下に
+    ある金額を選ぶ（「前回ご請求高｜…｜今回ご請求高」の見出し行の下に
+    金額行が並ぶ表形式の請求書のため）。無ければ列番号の近傍で探す（xlsx）。
+    """
     found: list[int] = []
     for r, row in enumerate(rows):
         for c, cell in enumerate(row):
-            if label not in cell:
+            # 「合 計 金 額」のように字間に空白を入れた見出しにも合わせる
+            norm_cell = re.sub(r"\s+", "", unicodedata.normalize("NFKC", cell))
+            if label not in norm_cell:
                 continue
             if "率" in cell and "%" in cell:
                 continue
-            rest = cell.split(label, 1)[1]
-            m = re.search(r"[\d,，]+", unicodedata.normalize("NFKC", rest))
+            rest = norm_cell.split(label, 1)[1]
+            m = _EMBEDDED_AMOUNT_RE.search(rest)
             if m:
                 a = _to_amount(m.group(0))
                 if a is not None:
@@ -371,18 +422,40 @@ def _collect_label_amounts(rows: list[list[str]], label: str) -> list[int]:
                     picked = a
                     break
             if picked is None:
+                label_x = cell_xs[r][c] if cell_xs else None
                 for rr in range(r + 1, min(r + 4, len(rows))):
                     below = rows[rr]
-                    for cc in range(max(0, c - 1), min(c + 5, len(below))):
-                        a = _to_amount(below[cc])
-                        if a is not None:
-                            picked = a
-                            break
+                    if label_x is not None:
+                        # 見出しの真下（X座標が最も近い）の金額
+                        cands = [
+                            (abs(cell_xs[rr][cc] - label_x), a)
+                            for cc in range(len(below))
+                            if (a := _to_amount(below[cc])) is not None
+                        ]
+                        if cands:
+                            picked = min(cands)[1]
+                    else:
+                        for cc in range(max(0, c - 1), min(c + 5, len(below))):
+                            a = _to_amount(below[cc])
+                            if a is not None:
+                                picked = a
+                                break
                     if picked is not None:
                         break
             if picked is not None:
                 found.append(picked)
     return found
+
+
+def _first_label_amount(
+    rows: list[list[str]], labels: tuple[str, ...], cell_xs: list[list[float]] | None = None
+) -> int | None:
+    """ラベル候補を順に探し、最初に金額が見つかったものを返す。"""
+    for label in labels:
+        amounts = _collect_label_amounts(rows, label, cell_xs)
+        if amounts:
+            return amounts[0]
+    return None
 
 
 def parse_invoice(
@@ -394,13 +467,20 @@ def parse_invoice(
     subaccounts: list[dict] | None = None,
     account_names: list[str] | None = None,
     force_review: bool = False,
+    cell_xs: list[list[float]] | None = None,
 ) -> tuple[ParseResult, list[str]]:
     """請求書（1枚）を仕訳1本にする。
 
-    金額は「当月合計額 + 消費税」（前月繰越や入金額を含まない当月分の税込）。
-    見つからないときは「請求金額」で代用し要確認を立てる。
+    金額は当月分の税込額。請求書の書式はまちまちなので、次の順で決める:
+      1. 税込の当月額（「当月合計金額」「税込今回お買上げ額」）
+      2. 税抜の当月額 + 消費税（「当月合計額」「税抜今回お買上高」）
+      3. 請求額（「今回ご請求高」「御請求金額」「請求金額合計」「合計金額」）。
+         前月繰越や入金が印字されていて0でなければ、当月分でない可能性が
+         あるので要確認を立てる。
     宛名（御中）にクライアント名があれば仕入、発行者にあれば売上と判定し、
     選択された書類タイプと食い違う場合は判定結果を優先して警告する。
+
+    cell_xs: OCR経由のとき、各セルの中心X座標（表の見出しの真下の金額を選ぶため）。
 
     戻り値: (ParseResult, マスタに無かった新しい取引先名のリスト)。
     """
@@ -448,31 +528,28 @@ def parse_invoice(
             f"「{source_name}」から取引先（{'宛名' if sales else '発行者'}）を読み取れませんでした。"
         )
 
-    # 金額: 当月合計 + 消費税
-    totals = []
-    for label in _INVOICE_TOTAL_LABELS:
-        totals.extend(_collect_label_amounts(rows, label))
-    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL)
+    # 金額: 税込の当月額 → 税抜の当月額+消費税 → 請求額 の順
+    tax_incl = _first_label_amount(rows, _INVOICE_TAXINCL_LABELS, cell_xs)
+    base = _first_label_amount(rows, _INVOICE_BASE_LABELS, cell_xs)
+    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_xs)
+    billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_xs)
     amount = None
-    if totals:
-        base = min(totals)
-        if taxes:
-            candidate = base + taxes[0]
-            # 「当月合計金額」（税込）が別に印字されていれば突合できる
-            amount = candidate if candidate in totals or len(totals) == 1 else max(totals)
-        else:
-            amount = max(totals)
-    else:
-        for label in _INVOICE_BILLED_LABELS:
-            billed = _collect_label_amounts(rows, label)
-            if billed:
-                amount = billed[0]
-                needs_review = True
-                result.warnings.append(
-                    "当月合計額が見つからなかったため「請求金額」を使いました。"
-                    "前月繰越を含む金額の可能性があるので確認してください。"
-                )
-                break
+    if tax_incl:
+        amount = tax_incl
+    elif base:
+        amount = base + taxes[0] if taxes else base
+    elif billed:
+        amount = billed
+        carry = [
+            a for label in _INVOICE_CARRY_LABELS
+            for a in _collect_label_amounts(rows, label, cell_xs)
+        ]
+        if any(carry):
+            needs_review = True
+            result.warnings.append(
+                "当月分の金額が見つからなかったため「請求金額」を使いました。"
+                "前月繰越や入金額が印字されているので、当月分の金額か確認してください。"
+            )
     if amount is None or amount <= 0:
         result.warnings.append(
             f"「{source_name}」から金額（当月合計額・消費税）を読み取れませんでした。"
