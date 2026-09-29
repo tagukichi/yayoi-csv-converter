@@ -213,16 +213,23 @@ def test_invoice_fallback_billed_amount():
 # group_rows がY座標で1行にまとめ、X座標順に並べる。
 
 
+_CHAR_W = 12.0  # テスト用: 1文字あたりの幅の目安（座標は相対比較にしか使わない）
+
+
 def _ocr_rows(*rows):
+    """(中心X, テキスト) の並びから、セル文字列とセルの左右端座標を作る。"""
     texts = [[t for _x, t in row] for row in rows]
-    xs = [[float(x) for x, _t in row] for row in rows]
-    return texts, xs
+    spans = [
+        [(x - _CHAR_W * len(t) / 2, x + _CHAR_W * len(t) / 2) for x, t in row]
+        for row in rows
+    ]
+    return texts, spans
 
 
-def _parse_purchase(texts, xs):
+def _parse_purchase(texts, spans):
     return parse_invoice(
         texts, "仕入請求書", client_name="株式会社Kライフ", force_review=True,
-        account_names=["外注費", "工事未払金"], cell_xs=xs,
+        account_names=["外注費", "工事未払金"], cell_spans=spans,
     )
 
 
@@ -282,6 +289,32 @@ def test_invoice_izumi_table_header():
     assert len(result.entries) == 1, result.warnings
     e = result.entries[0]
     assert e.amount == 89210  # 税込今回お買上げ額（税抜81,100+消費税8,110）
+    assert e.date == date(2026, 8, 31)
+    assert e.credit_sub == "イズミ株式会社"
+
+
+def test_invoice_izumi_merged_header_lines():
+    """イズミ: OCRが見出し行・金額行をそれぞれ1つの行テキストにまとめて返した場合。
+    文字位置から各見出し・各金額のX座標を見積もり、「税込今回お買上げ額」の
+    真下の 89,210 を採る（税抜の 81,100 や消費税額 8,110 ではない）。"""
+    header = "前回ご請求高 ご入金高 繰越高 税抜今回お買上高 消費税額 税込今回お買上げ額 今回ご請求高"
+    values = "0 0 0 81,100 8,110 89,210 89,210"
+    texts, spans = _ocr_rows(
+        [(420, "請求書")],
+        [(100, "株式会社 Kライフ 御中"), (700, "イズミ株式会社")],
+        [(560, "登録番号: T9-2300-0100-0232")],
+        [(290, "請求年月日"), (390, "コード"), (450, "締日"), (560, "請求対象期間")],
+        [(280, "2026年08月31日"), (390, "1828200"), (450, "31日"), (510, "2026年08月01日 ~ 2026年08月31日")],
+        [(450, header)],
+        [(480, values)],
+        [(680, "消費税率 税抜金額 消費税額 税込金額")],
+        [(690, "10% 81,100 8,110 89,210")],
+        [(690, "合計 81,100 8,110 89,210")],
+    )
+    result, _ = _parse_purchase(texts, spans)
+    assert len(result.entries) == 1, result.warnings
+    e = result.entries[0]
+    assert e.amount == 89210
     assert e.date == date(2026, 8, 31)
     assert e.credit_sub == "イズミ株式会社"
 
