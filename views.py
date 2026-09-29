@@ -572,9 +572,15 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
             document_type, acct_names
         )
         if document_type in INVOICE_TYPES:
+            # 座標で表の行を復元して渡す（「請求金額合計 | 35,000」のように
+            # ラベルと金額が別セルの請求書や、見出し行の下に金額が並ぶ表のため）
+            _inv_rows = group_rows(ocr_lines)
             result, _ = parse_invoice(
-                [[t] for t in texts], document_type, client_name=client, source_name=f.name,
+                [[c.text for c in row] for row in _inv_rows], document_type,
+                client_name=client, source_name=f.name,
                 rule=rule, subaccounts=subs_master, account_names=acct_names, force_review=True,
+                # 見出しの真下判定は中心X（金額は右寄せで左端がずれるため）
+                cell_xs=[[c.x + c.width / 2 for c in row] for row in _inv_rows],
             )
         else:
             _side = "sales" if document_type == "売上" else "purchase"
