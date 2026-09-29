@@ -319,6 +319,25 @@ def test_invoice_izumi_merged_header_lines():
     assert e.credit_sub == "イズミ株式会社"
 
 
+def test_invoice_tax_excluded_base_without_tax_line():
+    """税抜の見出ししか拾えず消費税も拾えなかったとき、税抜×1.10 の金額が
+    本文にあればそれを税込額として使う（見出しの行がばらけたOCR結果の保険）。"""
+    rows = [
+        ["2026年08月31日"], ["株式会社 Kライフ 御中"], ["イズミ株式会社"],
+        ["税抜今回お買上高"], ["81,100"], ["どこか離れた場所の税込額"], ["89,210"],
+    ]
+    result, _ = parse_invoice(rows, "仕入請求書", client_name="株式会社Kライフ")
+    e = result.entries[0]
+    assert e.amount == 89210
+    assert "税込額 89,210" in e.note
+
+    # 税込額がどこにも無ければ税抜のまま（備考に「消費税の記載なし」）
+    rows = [["2026年08月31日"], ["株式会社 Kライフ 御中"], ["イズミ株式会社"], ["税抜今回お買上高"], ["81,100"]]
+    result, _ = parse_invoice(rows, "仕入請求書", client_name="株式会社Kライフ")
+    assert result.entries[0].amount == 81100
+    assert "消費税の記載なし" in result.entries[0].note
+
+
 def test_invoice_kensho_label_and_amount_split():
     """KenSho: 「請求金額合計」と「35,000」が別セル。税込明細のみで消費税行が無い。"""
     texts, xs = _ocr_rows(

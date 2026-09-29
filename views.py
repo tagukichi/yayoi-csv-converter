@@ -593,7 +593,12 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
             )
             for e in result.entries:
                 e.needs_review = True
-        return result, "\n".join(texts), [], "OCRで読み取り"
+        if document_type in INVOICE_TYPES:
+            # 解析が見ているのと同じ「行の復元結果」を表示する（列は | 区切り）
+            preview = "\n".join(" | ".join(c.text for c in row) for row in _inv_rows)
+        else:
+            preview = "\n".join(texts)
+        return result, preview, [], "OCRで読み取り"
 
     # 領収書×写真は、複数レシートの可能性を最優先で確認する。
     # 駐車場領収書等は「カード利用明細」等の印字を含み、書類タイプの
