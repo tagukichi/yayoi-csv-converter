@@ -469,7 +469,21 @@ def _collect_label_amounts(
                             if cands:
                                 picked = min(cands)[1]
                         else:
+                            # 座標なし（xlsx や行テキストのみ）。見出しも金額も空白区切りで
+                            # 1セルに並んでいる場合は、見出しの何番目かで対応づける
+                            head_words = norm_cell.split()
+                            label_idx = next(
+                                (i for i, w in enumerate(head_words) if label_pat.search(w)), None
+                            )
                             for cc in range(max(0, c - 1), min(c + 5, len(below))):
+                                words = unicodedata.normalize("NFKC", below[cc]).split()
+                                if len(head_words) >= 2 and label_idx is not None and len(words) >= 2:
+                                    if label_idx < len(words):
+                                        a = _to_amount(words[label_idx])
+                                        if a is not None:
+                                            picked = a
+                                            break
+                                    continue
                                 toks = _amount_tokens(below[cc])
                                 if toks:
                                     picked = toks[0][0]
@@ -486,9 +500,47 @@ def _first_label_amount(
 ) -> tuple[str, int] | None:
     """ラベル候補を順に探し、最初に金額が見つかったものを (ラベル, 金額) で返す。"""
     for label in labels:
-        amounts = _collect_label_amounts(rows, label, cell_spans)
-        if amounts:
-            return label, amounts[0]
+        # 0 は「該当なし」の欄（繰越高 0 等）と区別がつかないので、正の金額を優先する
+        positive = [a for a in _collect_label_amounts(rows, label, cell_spans) if a > 0]
+        if positive:
+            return label, positive[0]
+    return None
+
+
+def find_invoice_amount(
+    rows: list[list], cell_spans: list[list[tuple[float, float]]] | None = None
+) -> tuple[int, str, bool] | None:
+    """請求書の「当月分の税込額」を見出しから決める。
+
+    順序: 税込の当月額 → 税抜の当月額＋消費税 → 請求額。
+    戻り値: (金額, 根拠の説明, 請求額を使ったが繰越・入金の印字があり要確認か)。
+    見出しが1つも見つからなければ None。
+    """
+    rows = _clean_rows(rows)
+    tax_incl = _first_label_amount(rows, _INVOICE_TAXINCL_LABELS, cell_spans)
+    base = _first_label_amount(rows, _INVOICE_BASE_LABELS, cell_spans)
+    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_spans)
+    billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_spans)
+    if tax_incl:
+        return tax_incl[1], f"金額は「{tax_incl[0]}」{tax_incl[1]:,}", False
+    if base:
+        if taxes:
+            amount = base[1] + taxes[0]
+            return amount, f"金額は「{base[0]}」{base[1]:,}＋消費税 {taxes[0]:,}", False
+        # 消費税の行を拾えなかったとき: 税抜×1.10（または×1.08）の金額が
+        # 書類のどこかに印字されていれば、それが税込額
+        all_amounts = {a for row in rows for cell in row for a, _s, _e in _amount_tokens(cell)}
+        for rate in (1.10, 1.08):
+            incl = round(base[1] * rate)
+            if incl in all_amounts:
+                return incl, f"金額は「{base[0]}」{base[1]:,}の税込額 {incl:,}（{rate:.2f}倍が本文にある）", False
+        return base[1], f"金額は「{base[0]}」{base[1]:,}（消費税の記載なし）", False
+    if billed:
+        carry = [
+            a for label in _INVOICE_CARRY_LABELS
+            for a in _collect_label_amounts(rows, label, cell_spans)
+        ]
+        return billed[1], f"金額は「{billed[0]}」{billed[1]:,}", any(carry)
     return None
 
 
@@ -563,44 +615,14 @@ def parse_invoice(
         )
 
     # 金額: 税込の当月額 → 税抜の当月額+消費税 → 請求額 の順
-    tax_incl = _first_label_amount(rows, _INVOICE_TAXINCL_LABELS, cell_spans)
-    base = _first_label_amount(rows, _INVOICE_BASE_LABELS, cell_spans)
-    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_spans)
-    billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_spans)
-    amount = None
-    basis = ""  # どの見出しから金額を決めたか（備考に残して確認しやすくする）
-    if tax_incl:
-        amount = tax_incl[1]
-        basis = f"金額は「{tax_incl[0]}」{amount:,}"
-    elif base:
-        if taxes:
-            amount = base[1] + taxes[0]
-            basis = f"金額は「{base[0]}」{base[1]:,}＋消費税 {taxes[0]:,}"
-        else:
-            # 消費税の行を拾えなかったとき: 税抜×1.10（または×1.08）の金額が
-            # 書類のどこかに印字されていれば、それが税込額
-            amount = base[1]
-            basis = f"金額は「{base[0]}」{base[1]:,}（消費税の記載なし）"
-            all_amounts = {a for row in rows for cell in row for a, _s, _e in _amount_tokens(cell)}
-            for rate in (1.10, 1.08):
-                incl = round(base[1] * rate)
-                if incl in all_amounts:
-                    amount = incl
-                    basis = f"金額は「{base[0]}」{base[1]:,}の税込額 {incl:,}（{rate:.2f}倍が本文にある）"
-                    break
-    elif billed:
-        amount = billed[1]
-        basis = f"金額は「{billed[0]}」{amount:,}"
-        carry = [
-            a for label in _INVOICE_CARRY_LABELS
-            for a in _collect_label_amounts(rows, label, cell_spans)
-        ]
-        if any(carry):
-            needs_review = True
-            result.warnings.append(
-                "当月分の金額が見つからなかったため「請求金額」を使いました。"
-                "前月繰越や入金額が印字されているので、当月分の金額か確認してください。"
-            )
+    found = find_invoice_amount(rows, cell_spans)
+    amount, basis = (found[0], found[1]) if found else (None, "")
+    if found and found[2]:
+        needs_review = True
+        result.warnings.append(
+            "当月分の金額が見つからなかったため「請求金額」を使いました。"
+            "前月繰越や入金額が印字されているので、当月分の金額か確認してください。"
+        )
     if amount is None or amount <= 0:
         result.warnings.append(
             f"「{source_name}」から金額（当月合計額・消費税）を読み取れませんでした。"

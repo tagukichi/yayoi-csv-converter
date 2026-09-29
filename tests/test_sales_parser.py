@@ -338,6 +338,40 @@ def test_invoice_tax_excluded_base_without_tax_line():
     assert "消費税の記載なし" in result.entries[0].note
 
 
+def test_electronic_invoice_uses_invoice_labels():
+    """書類タイプ「電子請求書」（領収書系の解析）で取り込んだ請求書も、
+    請求書の見出しから税込額を決める（行テキストの順番だと「合計」の次の
+    81,100 を拾ってしまう表形式）。"""
+    from doc_parser import parse_document
+
+    header = "前回ご請求高 ご入金高 繰越高 税抜今回お買上高 消費税額 税込今回お買上げ額 今回ご請求高"
+    values = "0 O 0 81,100 8,110 89,210 89,210"
+    texts, spans = _ocr_rows(
+        [(420, "請求書")],
+        [(100, "株式会社 Kライフ 御中"), (700, "イズミ株式会社")],
+        [(280, "2026年08月31日")],
+        [(450, header)],
+        [(480, values)],
+        [(680, "消費税率 税抜金額 消費税額 税込金額")],
+        [(690, "10% 81,100 8,110 89,210")],
+        [(690, "合計 81,100 8,110 89,210")],
+    )
+    lines = [c for row in texts for c in row]
+    result = parse_document(
+        lines, "電子請求書", source_name="izumi.pdf", client_name="株式会社Kライフ",
+        rows=texts, cell_spans=spans,
+    )
+    e = result.entries[0]
+    assert e.amount == 89210
+    assert "税込今回お買上" in e.note
+    assert e.credit_account == "未払金"
+    assert e.date == date(2026, 8, 31)
+
+    # 行と座標が無い（行テキストだけ）場合も、税抜×1.10 の保険で税込になる
+    result = parse_document(lines, "電子請求書", source_name="izumi.pdf")
+    assert result.entries[0].amount == 89210
+
+
 def test_invoice_kensho_label_and_amount_split():
     """KenSho: 「請求金額合計」と「35,000」が別セル。税込明細のみで消費税行が無い。"""
     texts, xs = _ocr_rows(

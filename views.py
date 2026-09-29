@@ -690,9 +690,13 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
             if bank_sub:
                 detail = (detail + " ・ " if detail else "") + bank_sub
     else:
+        # 請求書らしい書類は表の行を座標で復元して金額を決めるため、行と座標も渡す
+        _doc_rows = group_rows(ocr_lines)
         result = parse_document(
             texts, effective_type, source_name=f.name,
             custom_expense_rules=learned_expense, client_name=client,
+            rows=[[c.text for c in row] for row in _doc_rows],
+            cell_spans=[[(c.x, c.x + c.width) for c in row] for row in _doc_rows],
         )
         preview = "\n".join(texts)
     return result, preview, [], detail
