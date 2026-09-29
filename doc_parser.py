@@ -88,7 +88,10 @@ _AMOUNT_PATTERN = re.compile(r"[¥￥]?\s*(\d{1,3}(?:[,，.．]\s?\d{3})+|\d+)(?
 
 _SEPARATORS = re.compile(r"[,，.．\s]")
 
-_TOTAL_KEYWORDS = ("合計", "総額", "請求金額", "御請求額", "ご請求額", "領収金額", "お買上げ計", "お買い上げ計", "納入金額")
+_TOTAL_KEYWORDS = (
+    "合計", "総額", "請求金額", "御請求額", "ご請求額", "今回ご請求高", "今回御請求高",
+    "領収金額", "お買上げ計", "お買い上げ計", "納入金額", "お支払金額", "お支払い金額",
+)
 
 # レシートで合計と誤認しやすい行（預り金・釣り銭・ポイント）は金額候補から除外する
 _EXCLUDE_KEYWORDS = ("預り", "預かり", "お釣", "おつり", "釣り銭", "釣銭", "ポイント", "残高")
@@ -321,7 +324,8 @@ def _find_total(lines: list[str]) -> int | None:
             continue
         amounts = _amounts_in(line)
         all_amounts.extend(amounts)
-        if any(kw in line for kw in _TOTAL_KEYWORDS):
+        # 「伝票税抜合計」のような税抜の合計は税込額の候補にしない
+        if any(kw in line for kw in _TOTAL_KEYWORDS) and "税抜" not in line:
             for near in lines[i : i + 3]:
                 if any(kw in near for kw in _EXCLUDE_KEYWORDS):
                     continue
@@ -346,8 +350,15 @@ def parse_document(
     source_name: str = "",
     custom_expense_rules: list[tuple[str, str]] | None = None,
     client_name: str | None = None,
+    rows: list[list[str]] | None = None,
+    cell_spans: list[list[tuple[float, float]]] | None = None,
 ) -> ParseResult:
-    """OCRテキスト行を書類タイプに応じて仕訳データに変換する。"""
+    """OCRテキスト行を書類タイプに応じて仕訳データに変換する。
+
+    rows / cell_spans: 座標で復元した表の行と各セルの左右端X座標（あれば）。
+    請求書は「見出し行の下に金額が並ぶ表」が多く、行テキストの順番だけでは
+    税抜と税込を取り違えるため、請求書らしい書類ではこれを使って金額を決める。
+    """
     result = ParseResult()
 
     # コンビニのレシート等は数字・％が全角で印字される（「１０％対象 ￥１，６４２」）
@@ -361,7 +372,18 @@ def parse_document(
         )
         return result
 
-    total = _find_total(lines)
+    total = None
+    amount_basis = ""
+    if document_type == "電子請求書" or any("請求書" in ln for ln in lines):
+        # 請求書の見出し（今回ご請求高・税込今回お買上げ額・当月合計額＋消費税 等）
+        # から当月分の税込額を決める。sales_parser の仕入・売上請求書と同じ判定
+        from sales_parser import find_invoice_amount
+
+        found = find_invoice_amount(rows if rows else [[ln] for ln in lines], cell_spans)
+        if found and found[0] > 0:
+            total, amount_basis = found[0], found[1]
+    if total is None:
+        total = _find_total(lines)
     if total is None:
         result.warnings.append(
             "金額を検出できませんでした。OCR結果を確認し、手動で行を追加してください。"
@@ -420,7 +442,7 @@ def parse_document(
     # 10%との混在は会計事務所の指示により8%分と10%分の2行に分割する
     debit_tax = yayoi_tax(debit_account)
     credit_tax = yayoi_tax(credit_account)
-    note = "暫定解析（合計金額ベース）"
+    note = amount_basis or "暫定解析（合計金額ベース）"
     reduced_hint = ("軽減" in text) or re.search(r"8\s*[%％]\s*(?:軽減)?対象", text)
 
     def _entry(amount: int, tax: str, desc: str, entry_note: str) -> JournalEntry:
