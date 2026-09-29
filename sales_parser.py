@@ -573,8 +573,21 @@ def parse_invoice(
         amount = tax_incl[1]
         basis = f"金額は「{tax_incl[0]}」{amount:,}"
     elif base:
-        amount = base[1] + taxes[0] if taxes else base[1]
-        basis = f"金額は「{base[0]}」{base[1]:,}" + (f"＋消費税 {taxes[0]:,}" if taxes else "（消費税の記載なし）")
+        if taxes:
+            amount = base[1] + taxes[0]
+            basis = f"金額は「{base[0]}」{base[1]:,}＋消費税 {taxes[0]:,}"
+        else:
+            # 消費税の行を拾えなかったとき: 税抜×1.10（または×1.08）の金額が
+            # 書類のどこかに印字されていれば、それが税込額
+            amount = base[1]
+            basis = f"金額は「{base[0]}」{base[1]:,}（消費税の記載なし）"
+            all_amounts = {a for row in rows for cell in row for a, _s, _e in _amount_tokens(cell)}
+            for rate in (1.10, 1.08):
+                incl = round(base[1] * rate)
+                if incl in all_amounts:
+                    amount = incl
+                    basis = f"金額は「{base[0]}」{base[1]:,}の税込額 {incl:,}（{rate:.2f}倍が本文にある）"
+                    break
     elif billed:
         amount = billed[1]
         basis = f"金額は「{billed[0]}」{amount:,}"
