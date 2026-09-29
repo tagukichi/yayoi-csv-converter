@@ -470,10 +470,15 @@ def inject_css() -> None:
     st.markdown(compact, unsafe_allow_html=True)
 
 
-def set_upload_note(text: str) -> None:
-    """ドロップゾーンの案内文（対応形式）を差し替える。"""
+def set_upload_note(text: str, scope_key: str | None = None) -> None:
+    """ドロップゾーンの案内文（対応形式）を差し替える。
+
+    scope_key（st.container の key）を渡すと、そのカードの中のアップロード欄だけ
+    案内文を変える（受け付ける形式がカードごとに違う画面のため）。
+    """
+    selector = f'[class*="st-key-{scope_key}"]' if scope_key else ":root"
     st.markdown(
-        f"<style>:root {{ --yc-upload-note: \"{html.escape(text)}\"; }}</style>",
+        f"<style>{selector} {{ --yc-upload-note: \"{html.escape(text)}\"; }}</style>",
         unsafe_allow_html=True,
     )
 

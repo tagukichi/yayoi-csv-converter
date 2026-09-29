@@ -27,8 +27,8 @@ _SAMPLE_CLIENTS = ["A建設", "B工務店", "C社"]
 
 # data_editor での表示順・編集対象の列。DB の列と一対一。
 EDITABLE_COLUMNS = [
-    "取引日付", "借方勘定科目", "借方補助科目", "借方税区分",
-    "貸方勘定科目", "貸方補助科目", "貸方税区分",
+    "取引日付", "借方勘定科目", "借方補助科目", "借方部門", "借方税区分",
+    "貸方勘定科目", "貸方補助科目", "貸方部門", "貸方税区分",
     "金額", "摘要", "要確認", "備考", "出典ファイル",
 ]
 
@@ -39,9 +39,11 @@ CREATE TABLE IF NOT EXISTS entries (
     date TEXT NOT NULL,
     debit_account TEXT NOT NULL,
     debit_sub TEXT NOT NULL DEFAULT '',
+    debit_dept TEXT NOT NULL DEFAULT '',
     debit_tax TEXT NOT NULL DEFAULT '対象外',
     credit_account TEXT NOT NULL,
     credit_sub TEXT NOT NULL DEFAULT '',
+    credit_dept TEXT NOT NULL DEFAULT '',
     credit_tax TEXT NOT NULL DEFAULT '対象外',
     amount INTEGER NOT NULL,
     description TEXT NOT NULL DEFAULT '',
@@ -130,6 +132,18 @@ CREATE TABLE IF NOT EXISTS payroll_deductions (
     sub_account TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     UNIQUE (client, label)
+)
+"""
+
+# 部門マスタ（クライアント別）。弥生の仕訳CSVの借方部門・貸方部門の列や、
+# 会社が作った部門一覧（PDF・画像）から登録する。任意の事前登録
+_CREATE_DEPARTMENTS_SQL = """
+CREATE TABLE IF NOT EXISTS departments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    UNIQUE (client, name)
 )
 """
 
@@ -235,9 +249,11 @@ def _entry_to_record(client: str, e: JournalEntry, source_file: str) -> dict:
         "date": e.date.strftime("%Y/%m/%d"),
         "debit_account": e.debit_account,
         "debit_sub": e.debit_sub,
+        "debit_dept": e.debit_dept,
         "debit_tax": e.debit_tax,
         "credit_account": e.credit_account,
         "credit_sub": e.credit_sub,
+        "credit_dept": e.credit_dept,
         "credit_tax": e.credit_tax,
         "amount": e.amount,
         "description": e.description,
@@ -247,15 +263,29 @@ def _entry_to_record(client: str, e: JournalEntry, source_file: str) -> dict:
     }
 
 
+def _text(value) -> str:
+    """表のセルを文字列にする（空欄・欠損は空文字）。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
 def _row_to_record(client: str, r: pd.Series) -> dict:
     return {
         "client": client,
         "date": str(r["取引日付"]).strip(),
         "debit_account": str(r["借方勘定科目"]).strip(),
         "debit_sub": str(r.get("借方補助科目", "") or "").strip(),
+        "debit_dept": _text(r.get("借方部門")),
         "debit_tax": str(r["借方税区分"]).strip() or "対象外",
         "credit_account": str(r["貸方勘定科目"]).strip(),
         "credit_sub": str(r.get("貸方補助科目", "") or "").strip(),
+        "credit_dept": _text(r.get("貸方部門")),
         "credit_tax": str(r["貸方税区分"]).strip() or "対象外",
         "amount": int(r["金額"]),
         "description": str(r["摘要"]).strip(),
@@ -269,9 +299,11 @@ _JP_COLUMNS = {
     "date": "取引日付",
     "debit_account": "借方勘定科目",
     "debit_sub": "借方補助科目",
+    "debit_dept": "借方部門",
     "debit_tax": "借方税区分",
     "credit_account": "貸方勘定科目",
     "credit_sub": "貸方補助科目",
+    "credit_dept": "貸方部門",
     "credit_tax": "貸方税区分",
     "amount": "金額",
     "description": "摘要",
@@ -284,7 +316,11 @@ _JP_COLUMNS = {
 def _records_to_df(records: list[dict]) -> pd.DataFrame:
     if not records:
         return pd.DataFrame(columns=list(_JP_COLUMNS.values()))
-    df = pd.DataFrame(records)[list(_JP_COLUMNS.keys())].rename(columns=_JP_COLUMNS)
+    df = pd.DataFrame(records)
+    for col in ("debit_dept", "credit_dept"):  # 列追加前に作ったテーブル向け
+        if col not in df.columns:
+            df[col] = ""
+    df = df[list(_JP_COLUMNS.keys())].rename(columns=_JP_COLUMNS)
     df["要確認"] = df["要確認"].astype(bool)
     return df
 
@@ -301,6 +337,7 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     conn.execute(_CREATE_DOCTYPE_RULES_SQL)
     conn.execute(_CREATE_PARTNER_ROWS_SQL)
     conn.execute(_CREATE_PAYROLL_DEDUCTIONS_SQL)
+    conn.execute(_CREATE_DEPARTMENTS_SQL)
     conn.execute(_CREATE_DESC_DICT_SQL)
     conn.execute(_CREATE_MASTER_META_SQL)
     conn.execute(_CREATE_CLIENT_PREFS_SQL)
@@ -312,6 +349,10 @@ def _connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
         conn.commit()
     if "note" not in existing_cols:
         conn.execute("ALTER TABLE entries ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    if "debit_dept" not in existing_cols:
+        conn.execute("ALTER TABLE entries ADD COLUMN debit_dept TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE entries ADD COLUMN credit_dept TEXT NOT NULL DEFAULT ''")
         conn.commit()
     # 見本として入れていた既定の企業（A建設・B工務店・C社）は、テスト用の
     # ダミーなので仕訳ごと片付ける（本番のクライアントは画面から登録する）
@@ -355,7 +396,7 @@ def add_client(name: str, db_path: Path = DB_PATH) -> bool:
 _CLIENT_TABLES = (
     "entries", "subaccounts", "account_master", "desc_dict",
     "desc_rules", "doctype_rules", "partner_rows", "payroll_deductions",
-    "master_meta", "client_prefs",
+    "departments", "master_meta", "client_prefs",
 )
 
 
@@ -394,19 +435,21 @@ def add_entries(
     with _connect(db_path) as conn:
         conn.executemany(
             """INSERT INTO entries
-               (client, date, debit_account, debit_sub, debit_tax,
-                credit_account, credit_sub, credit_tax, amount, description,
+               (client, date, debit_account, debit_sub, debit_dept, debit_tax,
+                credit_account, credit_sub, credit_dept, credit_tax, amount, description,
                 needs_review, note, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     client,
                     e.date.strftime("%Y/%m/%d"),
                     e.debit_account,
                     e.debit_sub,
+                    e.debit_dept,
                     e.debit_tax,
                     e.credit_account,
                     e.credit_sub,
+                    e.credit_dept,
                     e.credit_tax,
                     e.amount,
                     e.description,
@@ -433,9 +476,11 @@ def load_entries(client: str, db_path: Path = DB_PATH) -> pd.DataFrame:
             """SELECT date AS 取引日付,
                       debit_account AS 借方勘定科目,
                       debit_sub AS 借方補助科目,
+                      debit_dept AS 借方部門,
                       debit_tax AS 借方税区分,
                       credit_account AS 貸方勘定科目,
                       credit_sub AS 貸方補助科目,
+                      credit_dept AS 貸方部門,
                       credit_tax AS 貸方税区分,
                       amount AS 金額,
                       description AS 摘要,
@@ -470,9 +515,11 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
                 str(r["取引日付"]).strip(),
                 str(r["借方勘定科目"]).strip(),
                 str(r.get("借方補助科目", "") or "").strip(),
+                _text(r.get("借方部門")),
                 str(r["借方税区分"]).strip() or "対象外",
                 str(r["貸方勘定科目"]).strip(),
                 str(r.get("貸方補助科目", "") or "").strip(),
+                _text(r.get("貸方部門")),
                 str(r["貸方税区分"]).strip() or "対象外",
                 int(r["金額"]),
                 str(r["摘要"]).strip(),
@@ -484,10 +531,10 @@ def replace_entries(client: str, df: pd.DataFrame, db_path: Path = DB_PATH) -> i
         ]
         conn.executemany(
             """INSERT INTO entries
-               (client, date, debit_account, debit_sub, debit_tax,
-                credit_account, credit_sub, credit_tax, amount, description,
+               (client, date, debit_account, debit_sub, debit_dept, debit_tax,
+                credit_account, credit_sub, credit_dept, credit_tax, amount, description,
                 needs_review, note, source_file)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
     return len(rows)
@@ -971,6 +1018,49 @@ def set_doctype_rule(
         )
 
 
+# --- 部門マスタ（クライアント別） ---
+
+
+def list_departments(client: str, db_path: Path = DB_PATH) -> list[str]:
+    """登録済みの部門名を登録順で返す。"""
+    if _supabase_enabled(db_path):
+        rows = (
+            _sb().table("departments").select("name")
+            .eq("client", client).order("id").execute().data
+        )
+        return [r["name"] for r in rows]
+    with _connect(db_path) as conn:
+        return [
+            r[0] for r in conn.execute(
+                "SELECT name FROM departments WHERE client = ? ORDER BY id", (client,)
+            )
+        ]
+
+
+def replace_departments(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:
+    """部門マスタを一括で置き換える（空欄・重複は除く）。登録件数を返す。
+
+    records は [{"name": 部門名}, ...]。事前登録の他のマスタと同じ形にしている。
+    """
+    names = list(dict.fromkeys(
+        _text(r.get("name")) for r in records if _text(r.get("name"))
+    ))
+    if _supabase_enabled(db_path):
+        _sb().table("departments").delete().eq("client", client).execute()
+        if names:
+            _sb().table("departments").insert(
+                [{"client": client, "name": n} for n in names]
+            ).execute()
+        return len(names)
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM departments WHERE client = ?", (client,))
+        conn.executemany(
+            "INSERT INTO departments (client, name) VALUES (?, ?)",
+            [(client, n) for n in names],
+        )
+    return len(names)
+
+
 # --- 給与台帳の控除項目→勘定科目の対応（クライアント別） ---
 
 
@@ -1015,6 +1105,33 @@ def ensure_payroll_deductions(client: str, labels: list[str], db_path: Path = DB
             [(client, l) for l in new_labels],
         )
     return len(records)
+
+
+def add_payroll_deduction(
+    client: str, label: str, account: str = "", sub_account: str = "", db_path: Path = DB_PATH
+) -> str:
+    """控除項目を1つ追加する（よく使う項目のボタン用）。
+
+    戻り値: "added"=新しく追加 / "filled"=登録済みで科目が空欄だったので科目を入れた /
+    "exists"=登録済みで科目も決まっているので何もしない。
+    """
+    label = label.strip()
+    current = {r["label"]: r for r in list_payroll_deductions(client, db_path)}
+    if label in current:
+        if current[label]["account"] or not account:
+            return "exists"
+        records = [
+            {**r, "account": account, "sub_account": sub_account} if r["label"] == label else r
+            for r in current.values()
+        ]
+        replace_payroll_deductions(client, records, db_path)
+        return "filled"
+    replace_payroll_deductions(
+        client,
+        list(current.values()) + [{"label": label, "account": account, "sub_account": sub_account}],
+        db_path,
+    )
+    return "added"
 
 
 def replace_payroll_deductions(client: str, records: list[dict], db_path: Path = DB_PATH) -> int:

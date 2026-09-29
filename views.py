@@ -36,6 +36,7 @@ from ocr import (
     credentials_available,
     group_rows,
     is_image_filename,
+    pdf_text_ocr_lines,
     run_ocr_lines,
     split_text_clusters,
 )
@@ -47,6 +48,7 @@ from sales_parser import (
     parse_partner_ledger,
     tabular_rows_from_bytes,
 )
+from deptmaster import parse_department_csv, parse_department_lines, pdf_text_lines
 from descdict import apply_desc_dictionary, dict_terms_by_account
 from submaster import (
     match_subaccount,
@@ -111,24 +113,64 @@ def review_count(client: str) -> int:
     return int(df["要確認"].sum()) if not df.empty else 0
 
 
+# 仕訳の編集の部門切り替え: 全体 / 部門なし / 各部門
+DEPT_ALL = "__all__"
+DEPT_NONE = "__none__"
+
+
+def dept_mask(df: pd.DataFrame, dept: str) -> pd.Series:
+    """部門の切り替えに合う行。借方・貸方のどちらかがその部門なら含める。"""
+    debit = df.get("借方部門", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+    credit = df.get("貸方部門", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+    if dept == DEPT_ALL:
+        return pd.Series(True, index=df.index)
+    if dept == DEPT_NONE:
+        return (debit == "") & (credit == "")
+    return (debit == dept) | (credit == dept)
+
+
+def filter_ledger(full: pd.DataFrame, review_only: bool, dept: str = DEPT_ALL) -> pd.DataFrame:
+    """要確認・部門の絞り込みを適用した表示用DataFrame（元のindexを保持）。"""
+    if full.empty:
+        return full
+    mask = dept_mask(full, dept)
+    if review_only:
+        mask &= full["要確認"].astype(bool)
+    return full[mask]
+
+
+def current_dept_filter() -> str:
+    return st.session_state.get("ledger_dept") or DEPT_ALL
+
+
 def _shown_df(full: pd.DataFrame) -> pd.DataFrame:
-    """絞り込み（要確認のみ）を適用した表示用DataFrame（元のindexを保持）。"""
-    if st.session_state.get("ledger_filter") == "review":
-        return full[full["要確認"]]
-    return full
+    """絞り込み（要確認のみ・部門）を適用した表示用DataFrame（元のindexを保持）。"""
+    return filter_ledger(
+        full, st.session_state.get("ledger_filter") == "review", current_dept_filter()
+    )
+
+
+def _default_dept(dept_filter: str) -> str:
+    """部門で絞り込んで表示中に追加した行に入れる部門（全体・部門なしなら空）。"""
+    return "" if dept_filter in (DEPT_ALL, DEPT_NONE) else dept_filter
 
 
 def _merge_editor_result(
-    full: pd.DataFrame, shown: pd.DataFrame, edited: pd.DataFrame
+    full: pd.DataFrame, shown: pd.DataFrame, edited: pd.DataFrame, default_dept: str = ""
 ) -> pd.DataFrame:
     """絞り込み表示中の編集結果を、表示していない行を保ったまま全体に反映する。
 
     data_editor は編集行は元のindexのまま、削除行は除き、追加行は新しい
-    indexで返すので、それを手掛かりに合成する。
+    indexで返すので、それを手掛かりに合成する。部門で絞り込んで表示中に
+    追加した行は、部門が空ならその部門を入れる（保存後に見えなくならないように）。
     """
     kept = [i for i in edited.index if i in shown.index]
     deleted = shown.index.difference(edited.index)
-    added = edited.loc[[i for i in edited.index if i not in shown.index]]
+    added = edited.loc[[i for i in edited.index if i not in shown.index]].copy()
+    if default_dept and len(added):
+        for col in ("借方部門", "貸方部門"):
+            if col in added.columns:
+                added[col] = added[col].fillna("").astype(str).replace("", default_dept)
     result = full.drop(index=deleted)
     if kept:
         result.loc[kept, edited.columns] = edited.loc[kept, edited.columns]
@@ -161,6 +203,17 @@ def account_options(target_client: str, df: pd.DataFrame) -> list[str]:
         if str(v).strip()
     ]
     return list(dict.fromkeys(master + _BUILTIN_ACCOUNTS + in_use))
+
+
+def dept_options(target_client: str, df: pd.DataFrame) -> list[str]:
+    """仕訳表の部門プルダウンの選択肢（空欄＝部門なし、登録済みの部門、今の仕訳の部門）。"""
+    in_use = [
+        str(v).strip()
+        for col in ("借方部門", "貸方部門") if col in df.columns
+        for v in df[col].fillna("").tolist()
+        if str(v).strip()
+    ]
+    return list(dict.fromkeys([""] + storage.list_departments(target_client) + in_use))
 
 
 def desc_sync(changes: dict, terms_by_account: dict[str, list[str]]) -> dict:
@@ -244,11 +297,12 @@ def persist_pending_edits(target_client: str) -> bool:
     if deleted:
         drop_idx = [positions[int(d)] for d in deleted if int(d) < len(positions)]
         full = full.drop(index=drop_idx)
+    _dept = _default_dept(current_dept_filter())
     for row in added:
         base = {
             "取引日付": datetime.now().strftime("%Y/%m/%d"),
-            "借方勘定科目": "", "借方補助科目": "", "借方税区分": "対象外",
-            "貸方勘定科目": "", "貸方補助科目": "", "貸方税区分": "対象外",
+            "借方勘定科目": "", "借方補助科目": "", "借方部門": _dept, "借方税区分": "対象外",
+            "貸方勘定科目": "", "貸方補助科目": "", "貸方部門": _dept, "貸方税区分": "対象外",
             "金額": 0, "摘要": "", "要確認": True, "備考": "", "出典ファイル": "",
         }
         base.update({k: v for k, v in row.items() if k in base})
@@ -373,6 +427,18 @@ def render_import(client: str) -> None:
             else:
                 st.caption("「事前登録」で普通預金の補助科目（銀行名）を登録すると、ここで口座を選べます。")
 
+        # 部門を登録している会社は、取り込む書類の部門を選べる（借方・貸方の両方に入る）
+        dept = ""
+        _depts = storage.list_departments(client)
+        if _depts:
+            _dept_choice = st.selectbox(
+                "部門", ["（部門なし）"] + _depts, key="import_dept",
+                help="選んだ部門が、今回取り込む書類から作る仕訳すべての借方部門・貸方部門に入ります。"
+                     "1枚ずつ部門が違うときは、取り込んだあと「仕訳の編集」で変えてください。",
+            )
+            if _dept_choice != "（部門なし）":
+                dept = _dept_choice
+
     # --- 2. アップロード ---
     # 買掛表はExcelでもらう運用のため、アップロードもExcel（xlsx/CSV）に限定する
     if document_type == "買掛表":
@@ -403,7 +469,7 @@ def render_import(client: str) -> None:
             st.warning("ファイルをアップロードしてください。")
         else:
             with details:
-                _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok)
+                _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok, dept)
 
     _render_import_log(log_slot)
 
@@ -413,6 +479,8 @@ def render_import(client: str) -> None:
             1. **最初に「事前登録」を済ませます**（企業ごとに1回だけ）。弥生会計から
                **科目一覧表.pdf・補助科目一覧.pdf・摘要科目一覧.pdf** の3つをPDF出力し、左メニューの「事前登録」で登録します。
                科目・補助科目・摘要は会計事務所・お客様ごとに違うため、これでその会社専用の振り分けになります
+               - 部門を使う会社は「事前登録④」で部門も登録します（弥生の仕訳CSVから読み取れます）。
+                 取り込むときに部門を選ぶと、仕訳の借方・貸方の両方に部門が入ります
             2. **書類タイプを選ぶ**（領収書／レシート・通帳・カード明細・給与台帳・売上・請求書・買掛表）
             3. **ファイルをアップロード**して **「変換を開始」** をクリック（読み取りに数十秒かかることがあります）
                - 買掛表は **ExcelやCSVのまま** アップロードします（OCR不要）。他の書類は写真・PDFでOKです
@@ -433,7 +501,7 @@ def render_import(client: str) -> None:
         )
 
 
-def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok) -> None:
+def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok, dept="") -> None:
     # 表の編集が「変更を保存」前でも消えないよう、先に自動保存する
     if persist_pending_edits(client):
         st.info("仕訳表の未保存の編集を自動保存してから取り込みます。")
@@ -485,6 +553,12 @@ def _run_conversion(client, uploaded_files, document_type, bank_sub, reimport_ok
                             st.caption(f"学習済みの摘要ルールを {_replaced} 件に適用しました。")
                     for w in result.warnings:
                         st.warning(w)
+                    if dept:
+                        # 取り込み時に選んだ部門を借方・貸方の両方に入れる
+                        for e in result.entries:
+                            e.debit_dept = e.debit_dept or dept
+                            e.credit_dept = e.credit_dept or dept
+                        detail = f"{detail} ・ 部門 {dept}" if detail else f"部門 {dept}"
                     with st.spinner("仕訳を登録中..."):
                         added = storage.add_entries(client, result.entries, source_file=f.name)
                     added_total += added
@@ -726,7 +800,31 @@ def render_ledger(client: str) -> None:
             format_func=lambda k: f"すべて {len(full)}" if k == "all" else f"要確認のみ {review}",
             default="all", key="ledger_filter", label_visibility="collapsed",
         )
+        # 部門の切り替え（部門を登録しているか、部門付きの仕訳がある会社だけ出す）
+        _dept_opts = [d for d in dept_options(client, full) if d]
+        if _dept_opts:
+            _dept_keys = [DEPT_ALL] + _dept_opts + [DEPT_NONE]
+            if "ledger_dept" in st.session_state and st.session_state["ledger_dept"] not in _dept_keys:
+                # 別の会社の部門が選ばれたままなら全体に戻す（default が効くようキーごと消す）
+                del st.session_state["ledger_dept"]
+
+            def _dept_label(k: str) -> str:
+                n = int(dept_mask(full, k).sum())
+                if k == DEPT_ALL:
+                    return f"全体 {n}"
+                if k == DEPT_NONE:
+                    return f"部門なし {n}"
+                return f"{k} {n}"
+
+            st.pills(
+                "部門", _dept_keys, format_func=_dept_label,
+                default=DEPT_ALL, key="ledger_dept", label_visibility="collapsed",
+            )
+        else:
+            # 部門の無い会社では、別の会社で選んだ部門の絞り込みを残さない
+            st.session_state.pop("ledger_dept", None)
     shown = _shown_df(full)
+    _add_dept = _default_dept(current_dept_filter())
 
     if review:
         T.notice(
@@ -737,6 +835,7 @@ def render_ledger(client: str) -> None:
         T.notice("要確認の仕訳はありません。CSV出力に進めます。", kind="ok")
 
     _acct_options = account_options(client, full)
+    _dept_col_options = dept_options(client, full)
     _dict_terms = dict_terms_by_account(storage.list_desc_dict(client))
     edited = st.data_editor(
         shown,
@@ -751,12 +850,20 @@ def render_ledger(client: str) -> None:
                 help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
             ),
             "借方補助科目": st.column_config.TextColumn(width="small"),
+            "借方部門": st.column_config.SelectboxColumn(
+                options=_dept_col_options, width="small",
+                help="事前登録④の部門から選べます。空欄は部門なし",
+            ),
             "借方税区分": st.column_config.TextColumn(width="small"),
             "貸方勘定科目": st.column_config.SelectboxColumn(
                 options=_acct_options, width="small",
                 help="プルダウンから選べます。科目を変えると税区分も自動で合わせます",
             ),
             "貸方補助科目": st.column_config.TextColumn(width="small"),
+            "貸方部門": st.column_config.SelectboxColumn(
+                options=_dept_col_options, width="small",
+                help="事前登録④の部門から選べます。空欄は部門なし",
+            ),
             "貸方税区分": st.column_config.TextColumn(width="small"),
             "金額": st.column_config.NumberColumn(
                 min_value=0, step=1, format="localized", width="small"
@@ -773,7 +880,7 @@ def render_ledger(client: str) -> None:
         },
         key=ledger_editor_key(),
     )
-    merged = _merge_editor_result(full, shown, edited)
+    merged = _merge_editor_result(full, shown, edited, _add_dept)
 
     with col_save:
         if st.button("変更を保存", type="primary", use_container_width=True):
@@ -790,7 +897,7 @@ def render_ledger(client: str) -> None:
                         # 科目だけ変えた行は税区分（と辞書の摘要が1つなら摘要）も合わせる
                         for col, value in {**tax_sync(changes), **desc_sync(changes, _dict_terms)}.items():
                             edited.loc[idx, col] = value
-                merged = _merge_editor_result(full, shown, edited)
+                merged = _merge_editor_result(full, shown, edited, _add_dept)
                 saved = storage.replace_entries(client, merged)
                 message = f"{saved} 件を保存しました。"
                 if learned_total:
@@ -945,8 +1052,10 @@ def _entries_from_df(df: pd.DataFrame) -> tuple[list[JournalEntry], str | None]:
                     date=datetime.strptime(str(row["取引日付"]).strip(), "%Y/%m/%d").date(),
                     debit_account=str(row["借方勘定科目"]).strip(),
                     debit_sub=str(row.get("借方補助科目", "") or "").strip(),
+                    debit_dept=str(row.get("借方部門", "") or "").strip(),
                     credit_account=str(row["貸方勘定科目"]).strip(),
                     credit_sub=str(row.get("貸方補助科目", "") or "").strip(),
+                    credit_dept=str(row.get("貸方部門", "") or "").strip(),
                     amount=int(row["金額"]),
                     description=str(row["摘要"]).strip(),
                     debit_tax=str(row["借方税区分"]).strip() or "対象外",
@@ -1018,8 +1127,10 @@ def render_export(client: str) -> None:
         "<tr>"
         f'<td class="no">{i}</td>'
         f"<td>{e.date:%Y/%m/%d}</td>"
-        f"<td>{html.escape(e.debit_account + (f'（{e.debit_sub}）' if e.debit_sub else ''))}</td>"
-        f"<td>{html.escape(e.credit_account + (f'（{e.credit_sub}）' if e.credit_sub else ''))}</td>"
+        f"<td>{html.escape(e.debit_account + (f'（{e.debit_sub}）' if e.debit_sub else ''))}"
+        f"{f'<br><small>{html.escape(e.debit_dept)}</small>' if e.debit_dept else ''}</td>"
+        f"<td>{html.escape(e.credit_account + (f'（{e.credit_sub}）' if e.credit_sub else ''))}"
+        f"{f'<br><small>{html.escape(e.credit_dept)}</small>' if e.credit_dept else ''}</td>"
         f'<td class="num">{e.amount:,}</td>'
         f'<td class="desc">{html.escape(e.description)}</td>'
         "</tr>"
@@ -1048,15 +1159,24 @@ _MASTER_KINDS = {
     "subaccounts": {"label": "補助科目一覧", "unit": "補助科目"},
     "accounts": {"label": "科目一覧表", "unit": "勘定科目"},
     "desc_dict": {"label": "摘要科目一覧", "unit": "摘要"},
+    "departments": {
+        "label": "部門一覧", "unit": "部門",
+        "bad_file": "弥生の仕訳CSV（借方部門・貸方部門が入ったもの）か、部門名の一覧かどうか確認してください。",
+    },
 }
 
 
-def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, save_fn) -> None:
-    """事前登録カードの中身（登録済みの表示／PDFのアップロードと登録）。
+def _render_master_pdf_box(
+    client, kind, count, steps_md, parse_fn, summary_fn, save_fn, file_types=("pdf",)
+) -> None:
+    """事前登録カードの中身（登録済みの表示／ファイルのアップロードと登録）。
 
     登録済みなら「登録済み・ファイル名・日時」と、削除して登録し直すボタンを
-    出す。未登録ならPDFのアップロード欄を出し、読み取り・登録の間は
+    出す。未登録ならアップロード欄を出し、読み取り・登録の間は
     スピナーで進行中であることを示す。
+
+    parse_fn はアップロードされたファイル（name と getvalue() を持つ）を受け取る。
+    summary_fn が一覧を返した場合は、それ（画面で直した内容）を登録する。
     """
     info = _MASTER_KINDS[kind]
     meta = storage.get_master_meta(client, kind)
@@ -1083,42 +1203,106 @@ def _render_master_pdf_box(client, kind, count, steps_md, parse_fn, summary_fn, 
     with st.expander("手順"):
         st.markdown(steps_md)
     uploaded = st.file_uploader(
-        f"{info['label']}のPDF", type=["pdf"], key=f"{kind}_pdf", label_visibility="collapsed",
+        f"{info['label']}のファイル", type=list(file_types), key=f"{kind}_pdf",
+        label_visibility="collapsed",
     )
     if uploaded is None:
         return
-    with st.spinner(f"「{uploaded.name}」を読み込み中..."):
-        try:
-            records = parse_fn(uploaded.getvalue())
-        except Exception as e:
-            records = []
-            st.error(f"PDFの読み取りに失敗しました: {e}")
+    # 読み取り結果はファイルごとに覚えておく（画面の操作のたびにOCRし直さないため）
+    cache_key = f"{kind}_parsed"
+    cached = st.session_state.get(cache_key)
+    if cached and cached[0] == (uploaded.name, uploaded.size):
+        records = cached[1]
+    else:
+        with st.spinner(f"「{uploaded.name}」を読み込み中..."):
+            try:
+                records = parse_fn(uploaded)
+            except Exception as e:
+                records = []
+                st.error(f"ファイルの読み取りに失敗しました: {e}")
+        st.session_state[cache_key] = ((uploaded.name, uploaded.size), records)
     if not records:
         st.error(
             f"{info['unit']}を読み取れませんでした。"
-            f"弥生の「{info['label']}」のPDFかどうか確認してください。"
+            + info.get("bad_file", f"弥生の「{info['label']}」のPDFかどうか確認してください。")
         )
         return
     st.success(f"{len(records)} 件の{info['unit']}を読み取りました。内容を確認してください:")
-    summary_fn(records)
+    reviewed = summary_fn(records)
+    if reviewed is not None:
+        records = reviewed
     if st.button(f"この {len(records)} 件を登録する", type="primary", key=f"{kind}_import",
-                 use_container_width=True):
+                 use_container_width=True, disabled=not records):
         with st.spinner("登録中..."):
             saved = save_fn(client, records)
             storage.set_master_meta(client, kind, uploaded.name)
+        st.session_state.pop(cache_key, None)
         st.session_state["sub_flash"] = (
             f"「{uploaded.name}」から {saved} 件の{info['unit']}を登録しました。"
         )
         st.rerun()
 
 
+def _parse_department_file(f) -> list[dict]:
+    """部門のファイル（CSV・PDF・画像）から部門名を読み取る。
+
+    CSV は弥生の仕訳CSV（借方部門・貸方部門の列）か部門名の一覧。
+    PDF は文字が埋め込まれていればそのまま、スキャンならOCRで読む。画像はOCR。
+    """
+    name = f.name.lower()
+    data = f.getvalue()
+    if name.endswith((".csv", ".txt")):
+        return parse_department_csv(data)
+    if name.endswith(".pdf"):
+        lines = pdf_text_lines(data)
+        if lines:
+            return parse_department_lines(lines)
+    else:
+        data, _note = compress_image_if_needed(data, f.name)
+    return parse_department_lines([ln.text for ln in run_ocr_lines(data)])
+
+
+def _read_payroll_lines(f):
+    """給与台帳（PDF・画像）を座標付きの行にする。文字入りPDFはOCRを使わない。"""
+    data = f.getvalue()
+    if f.name.lower().endswith(".pdf"):
+        lines = pdf_text_ocr_lines(data)
+        if lines:
+            return lines
+    else:
+        data, _note = compress_image_if_needed(data, f.name)
+    return run_ocr_lines(data)
+
+
+# よく使う給与の控除項目と、推奨の勘定科目・補助科目（会計事務所の確認前の案。
+# 追加後に表で変えられる）。健康保険・厚生年金・雇用保険・所得税・住民税・
+# 土建組合・社員旅行積立は給与台帳の解析が自動で預り金に入れるので含めない
+PAYROLL_DEDUCTION_PRESETS = [
+    ("駐車場代", "雑収入", ""),
+    ("社宅", "受取家賃", ""),
+    ("寮費", "受取家賃", ""),
+    ("水道光熱費", "立替金", ""),
+    ("立替返済", "立替金", ""),
+    ("貸付金返済", "貸付金", ""),
+    ("組合費", "預り金", "組合費"),
+    ("親睦会費", "預り金", "親睦会費"),
+    ("財形貯蓄", "預り金", "財形貯蓄"),
+    ("生命保険料", "預り金", "生命保険料"),
+    ("食事代", "福利厚生費", ""),
+]
+
+
 def render_masters(client: str) -> None:
     _master = storage.list_subaccounts(client)
     _acct_master = storage.list_account_master(client)
     _desc_dict = storage.list_desc_dict(client)
+    _depts = storage.list_departments(client)
     T.page_header(
         NAV_MASTERS,
-        meta=f"{client} ・ 勘定科目 {len(_acct_master)}件 ・ 補助科目 {len(_master)}件 ・ 摘要辞書 {len(_desc_dict)}件",
+        meta=(
+            f"{client} ・ 勘定科目 {len(_acct_master)}件 ・ 補助科目 {len(_master)}件 ・ "
+            f"摘要辞書 {len(_desc_dict)}件 ・ 部門 {len(_depts)}件"
+        ),
     )
     st.markdown(
         "クライアント企業ごとの弥生の科目体系を登録しておくと、通帳の摘要や売掛表・請求書の"
@@ -1127,13 +1311,16 @@ def render_masters(client: str) -> None:
     if sub_flash := st.session_state.pop("sub_flash", None):
         st.success(sub_flash)
 
-    # この画面のアップロードは弥生のPDFのみ。カードの幅が狭いので案内文も短くする
+    # カードの幅が狭いので案内文も短くする。①〜③は弥生のPDF、④部門と
+    # 給与の控除項目はカードごとに受け付ける形式が違うので、そのカードだけ変える
     T.set_upload_note("弥生から出力したPDF ・ 200MBまで")
+    T.set_upload_note("弥生の仕訳CSV・PDF・画像 ・ 200MBまで", scope_key="yccard10")
+    T.set_upload_note("給与台帳のPDF・画像 ・ 200MBまで", scope_key="yccard7")
 
     # 上段は3つのカードでPDF登録だけを並べ、表（確認・編集）は下に全幅で置く。
     # 表を3カラムに入れると狭くて編集しづらいため。
     # 科目一覧表があっての補助科目一覧なので、①科目 → ②補助科目 の順に並べる
-    col_acct_master, col_sub_master, col_dict = st.columns(3)
+    col_acct_master, col_sub_master, col_dict, col_dept = st.columns(4)
     with col_acct_master, st.container(border=True, key="yccard4"):
         T.card_title(
             "事前登録①：科目一覧表",
@@ -1152,13 +1339,67 @@ def render_masters(client: str) -> None:
             "弥生の「摘要科目一覧.pdf」を登録します。書類の内容に辞書の語があれば、その会社の流儀の摘要と科目が入ります",
         )
         box_dict_pdf = st.container()
+    with col_dept, st.container(border=True, key="yccard10"):
+        T.card_title(
+            "事前登録④：部門（任意）",
+            "部門を使う会社だけ登録します。弥生の仕訳CSVから部門を読み取り、取り込むときに部門を選べるようになります",
+        )
+        box_dept = st.container()
 
     # 登録内容の確認・編集（全幅・タブで切り替え）
     with st.container(border=True, key="yccard6"):
         T.card_title("登録内容の確認・編集","表を直接編集して「変更を保存」を押すと、登録内容を書き換えられます")
-        tab_acct_list, tab_master_list, tab_dict_list = st.tabs(
-            ["勘定科目", "補助科目", "摘要辞書"]
+        tab_acct_list, tab_master_list, tab_dict_list, tab_dept_list = st.tabs(
+            ["勘定科目", "補助科目", "摘要辞書", "部門"]
         )
+
+    # --- 部門: ファイルから登録 ---
+    def _dept_summary(records: list[dict]) -> list[dict]:
+        st.caption("不要な行は削除、足りない部門は行を追加してから登録してください。")
+        edited = st.data_editor(
+            pd.DataFrame(records).rename(columns={"name": "部門名"}),
+            num_rows="dynamic", use_container_width=True, height=240,
+            key=f"dept_preview_{len(records)}",
+        )
+        return [
+            {"name": str(n).strip()} for n in edited["部門名"].tolist()
+            if pd.notna(n) and str(n).strip()
+        ]
+
+    with box_dept:
+        _render_master_pdf_box(
+            client, "departments", len(_depts),
+            """
+            1. 弥生会計の仕訳を **CSVでエクスポート** します（借方部門・貸方部門が入った仕訳を含めてください）
+            2. その **CSV** を下にアップロードします。会社が作った部門一覧の **PDF・画像** でも読み取れます
+            3. 読み取った部門を確認・修正して「登録する」を押します
+
+            下の「登録内容の確認・編集」の「部門」タブから、手で追加・修正することもできます。
+            部門名は弥生に登録してある部門名と1文字違わず同じにしてください。
+            """,
+            _parse_department_file, _dept_summary, storage.replace_departments,
+            file_types=("csv", "pdf", "png", "jpg", "jpeg"),
+        )
+
+    # --- 部門: 確認・編集（手動での追加・修正・削除） ---
+    with tab_dept_list:
+        if not _depts:
+            st.info("まだ登録されていません。上の「事前登録④」からファイルを読み取るか、下の表に部門名を入力して「保存」を押してください。")
+        # 空のときも文字列の列にする（空リストだと数値列になり、表で編集できない）
+        dept_view = pd.DataFrame({"部門名": pd.Series(_depts, dtype="object")})
+        edited_depts = st.data_editor(
+            dept_view, num_rows="dynamic", use_container_width=True,
+            key=f"dept_editor_{len(_depts)}",
+            column_config={
+                "部門名": st.column_config.TextColumn(help="弥生に登録してある部門名と1文字違わず同じにしてください"),
+            },
+        )
+        if st.button("変更を保存", key="dept_save"):
+            saved = storage.replace_departments(
+                client, [{"name": n} for n in edited_depts["部門名"].tolist() if pd.notna(n)]
+            )
+            st.session_state["sub_flash"] = f"{saved} 件の部門を保存しました。"
+            st.rerun()
 
     with st.container(border=True, key="yccard7"):
         T.card_title(
@@ -1188,7 +1429,7 @@ def render_masters(client: str) -> None:
             2. その **摘要科目一覧.pdf** を下にアップロードします
             3. 読み取り結果を確認して「登録する」を押します
             """,
-            parse_yayoi_desc_dict_pdf, _dict_summary, storage.replace_desc_dict,
+            lambda f: parse_yayoi_desc_dict_pdf(f.getvalue()), _dict_summary, storage.replace_desc_dict,
         )
 
     # --- 摘要辞書: 確認・編集 ---
@@ -1236,7 +1477,7 @@ def render_masters(client: str) -> None:
             2. その **補助科目一覧.pdf** を下にアップロードします
             3. 読み取り結果を確認して「登録する」を押します
             """,
-            parse_yayoi_subaccount_pdf, _sub_summary, storage.replace_subaccounts,
+            lambda f: parse_yayoi_subaccount_pdf(f.getvalue()), _sub_summary, storage.replace_subaccounts,
         )
 
     # --- 補助科目: 確認・編集 ---
@@ -1297,7 +1538,7 @@ def render_masters(client: str) -> None:
 
             登録した科目は「書類タイプの紐付け」と仕訳の科目候補に使われます。
             """,
-            parse_yayoi_account_pdf, _acct_summary, storage.replace_account_master,
+            lambda f: parse_yayoi_account_pdf(f.getvalue()), _acct_summary, storage.replace_account_master,
         )
 
     # --- 勘定科目: 確認・編集 ---
@@ -1388,13 +1629,69 @@ def render_masters(client: str) -> None:
             "健康保険・厚生年金・雇用保険・所得税・住民税は自動で預り金に入るので、ここには不要です。"
         )
         st.caption(
-            "給与台帳を取り込むと、見つかった項目が科目空欄でここに並びます。"
             "科目が空欄の項目は、仮に「預り金（補助科目＝項目名）」で要確認になります。"
         )
+
+        # 1) 給与台帳から控除項目だけを読み取って登録する（仕訳は作らない）
+        col_up, col_btn = st.columns([3, 1])
+        payroll_file = col_up.file_uploader(
+            "給与台帳（PDF・画像）から控除項目を読み取る", type=["pdf", "png", "jpg", "jpeg"],
+            key="payroll_deduction_upload",
+            help="控除金額欄（所得税〜⑥小計の間）の項目を読み取り、下の表に追加します。仕訳は作りません。",
+        )
+        col_btn.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if col_btn.button("読み取って登録", key="payroll_deduction_read",
+                          disabled=payroll_file is None, use_container_width=True):
+            with st.spinner(f"「{payroll_file.name}」を読み込み中..."):
+                try:
+                    _pay_rows = group_rows(_read_payroll_lines(payroll_file))
+                    _labels = parse_payroll(_pay_rows).deduction_labels
+                except Exception as e:
+                    _labels = None
+                    st.error(f"給与台帳の読み取りに失敗しました: {e}")
+            if _labels is not None:
+                if not _labels:
+                    st.warning(
+                        "控除金額欄に会社独自の項目が見つかりませんでした"
+                        "（所得税・住民税などの決まった項目は自動で預り金に入るので、登録は不要です）。"
+                    )
+                else:
+                    _added = storage.ensure_payroll_deductions(client, _labels)
+                    st.session_state["sub_flash"] = (
+                        f"給与台帳から控除項目 {len(_labels)} 件（" + "、".join(_labels) + "）を読み取り、"
+                        f"新しく {_added} 件を登録しました。科目を選んで「控除項目を保存」を押してください。"
+                    )
+                    st.session_state["payroll_editor_rev"] = st.session_state.get("payroll_editor_rev", 0) + 1
+                    st.rerun()
+
+        # 2) よく使う控除項目をボタンで追加（推奨の科目入り。表で変えられる）
+        st.markdown("**よく使う控除項目を追加**（推奨の科目が入ります。表で変えられます）")
+        _registered = {r["label"]: r for r in storage.list_payroll_deductions(client)}
+        _preset_cols = st.columns(6)
+        for i, (label, account, sub) in enumerate(PAYROLL_DEDUCTION_PRESETS):
+            _done = label in _registered and bool(_registered[label]["account"])
+            if _preset_cols[i % 6].button(
+                label, key=f"payroll_preset_{label}", use_container_width=True, disabled=_done,
+                help=f"推奨: {account}" + (f"（補助科目 {sub}）" if sub else "")
+                     + ("　※登録済み" if _done else ""),
+            ):
+                outcome = storage.add_payroll_deduction(client, label, account, sub)
+                st.session_state["sub_flash"] = (
+                    f"控除項目「{label}」を {account}"
+                    + (f"（補助科目 {sub}）" if sub else "")
+                    + ("で追加しました。" if outcome == "added" else "の科目で埋めました。")
+                )
+                st.session_state["payroll_editor_rev"] = st.session_state.get("payroll_editor_rev", 0) + 1
+                st.rerun()
+        st.caption("推奨の科目は一般的な例です。事務所の処理に合わせて変えてください。")
+
         _payroll_rows = storage.list_payroll_deductions(client)
         _acct_names_pay = [r["name"] for r in _acct_master]
         _acct_options = list(dict.fromkeys(
-            _acct_names_pay + ["預り金", "立替金", "雑収入", "受取家賃", "貸付金", "未収入金"]
+            _acct_names_pay
+            + ["預り金", "立替金", "雑収入", "受取家賃", "貸付金", "未収入金"]
+            + [account for _l, account, _s in PAYROLL_DEDUCTION_PRESETS]
+            + [r["account"] for r in _payroll_rows if r["account"]]
         ))
         payroll_view = (
             pd.DataFrame(_payroll_rows)[["label", "account", "sub_account"]]
@@ -1403,7 +1700,8 @@ def render_masters(client: str) -> None:
         )
         payroll_view["勘定科目"] = payroll_view["勘定科目"].replace("", None)
         edited_payroll = st.data_editor(
-            payroll_view, num_rows="dynamic", use_container_width=True, key="payroll_deduction_editor",
+            payroll_view, num_rows="dynamic", use_container_width=True,
+            key=f"payroll_deduction_editor_{st.session_state.get('payroll_editor_rev', 0)}",
             column_config={
                 "控除項目": st.column_config.TextColumn(help="給与台帳の見出しと同じ文字にしてください"),
                 "勘定科目": st.column_config.SelectboxColumn(options=_acct_options, help="空欄なら預り金で要確認になります"),
@@ -1418,6 +1716,7 @@ def render_masters(client: str) -> None:
             ]
             saved = storage.replace_payroll_deductions(client, records)
             st.session_state["sub_flash"] = f"給与の控除項目 {saved} 件を保存しました。"
+            st.session_state["payroll_editor_rev"] = st.session_state.get("payroll_editor_rev", 0) + 1
             st.rerun()
 
 
