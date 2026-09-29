@@ -483,12 +483,12 @@ def _collect_label_amounts(
 
 def _first_label_amount(
     rows: list[list[str]], labels: tuple[str, ...], cell_spans: list[list[tuple[float, float]]] | None = None
-) -> int | None:
-    """ラベル候補を順に探し、最初に金額が見つかったものを返す。"""
+) -> tuple[str, int] | None:
+    """ラベル候補を順に探し、最初に金額が見つかったものを (ラベル, 金額) で返す。"""
     for label in labels:
         amounts = _collect_label_amounts(rows, label, cell_spans)
         if amounts:
-            return amounts[0]
+            return label, amounts[0]
     return None
 
 
@@ -568,12 +568,16 @@ def parse_invoice(
     taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_spans)
     billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_spans)
     amount = None
+    basis = ""  # どの見出しから金額を決めたか（備考に残して確認しやすくする）
     if tax_incl:
-        amount = tax_incl
+        amount = tax_incl[1]
+        basis = f"金額は「{tax_incl[0]}」{amount:,}"
     elif base:
-        amount = base + taxes[0] if taxes else base
+        amount = base[1] + taxes[0] if taxes else base[1]
+        basis = f"金額は「{base[0]}」{base[1]:,}" + (f"＋消費税 {taxes[0]:,}" if taxes else "（消費税の記載なし）")
     elif billed:
-        amount = billed
+        amount = billed[1]
+        basis = f"金額は「{billed[0]}」{amount:,}"
         carry = [
             a for label in _INVOICE_CARRY_LABELS
             for a in _collect_label_amounts(rows, label, cell_spans)
@@ -617,6 +621,7 @@ def parse_invoice(
             debit_tax=yayoi_tax(debit),
             credit_tax=yayoi_tax(credit),
             needs_review=needs_review,
+            note=basis,
         )
     )
     return result, new_partners
