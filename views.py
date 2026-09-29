@@ -579,8 +579,8 @@ def _parse_uploaded_file(client, f, document_type, bank_sub, learned_expense, le
                 [[c.text for c in row] for row in _inv_rows], document_type,
                 client_name=client, source_name=f.name,
                 rule=rule, subaccounts=subs_master, account_names=acct_names, force_review=True,
-                # 見出しの真下判定は中心X（金額は右寄せで左端がずれるため）
-                cell_xs=[[c.x + c.width / 2 for c in row] for row in _inv_rows],
+                # 各セルの左端・右端（見出しの真下にある金額を選ぶため）
+                cell_spans=[[(c.x, c.x + c.width) for c in row] for row in _inv_rows],
             )
         else:
             _side = "sales" if document_type == "売上" else "purchase"

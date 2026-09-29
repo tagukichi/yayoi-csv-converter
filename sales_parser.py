@@ -388,71 +388,105 @@ def _find_issuer(rows: list[list[str]], exclude: str) -> str:
     return ""
 
 
+def _amount_tokens(text: str) -> list[tuple[int, int, int]]:
+    """テキスト中の金額トークンを [(金額, 開始位置, 終了位置)] で返す。
+
+    「10%」の率、「T9-2300-…」「044-522-…」の番号、「2026年08月31日」の
+    日付の数字は金額でないので除く。位置は NFKC 正規化後の文字位置。
+    """
+    norm = unicodedata.normalize("NFKC", text)
+    out: list[tuple[int, int, int]] = []
+    for m in _EMBEDDED_AMOUNT_RE.finditer(norm):
+        head = norm[m.start() - 1] if m.start() > 0 else ""
+        head2 = norm[m.start() - 2] if m.start() > 1 else ""
+        tail = norm[m.end()] if m.end() < len(norm) else ""
+        tail2 = norm[m.end() + 1] if m.end() + 1 < len(norm) else ""
+        # 「T9-2300」「044-522」のように数字と数字を「-」「/」でつないだ番号・日付
+        joined_number = (head in "-−/" and head2.isdigit()) or (tail in "-−/" and tail2.isdigit())
+        if head.isalpha() or joined_number or (tail and tail in "年月日時分名式枚袋台個%"):
+            continue
+        a = _to_amount(m.group(0))
+        if a is not None:
+            out.append((a, m.start(), m.end()))
+    return out
+
+
+def _pos_center(span: tuple[float, float], n: int, s: int, e: int) -> float:
+    """セルの左右端 span と文字数 n から、文字位置 s〜e の中心X座標を見積もる。"""
+    left, right = span
+    return left + (right - left) * ((s + e) / 2) / max(n, 1)
+
+
 def _collect_label_amounts(
-    rows: list[list[str]], label: str, cell_xs: list[list[float]] | None = None
+    rows: list[list[str]], label: str, cell_spans: list[list[tuple[float, float]]] | None = None
 ) -> list[int]:
-    """ラベルを含むセルの金額を集める。同セル内の後続数値 → 右のセル →
+    """ラベルを含むセルの金額を集める。同セル内でラベルの後ろ → 右のセル →
     直下1〜3行の同じ列、の順で探す。
 
-    cell_xs（OCRの各セルのX座標）があれば、直下の行では見出しの真下に
-    ある金額を選ぶ（「前回ご請求高｜…｜今回ご請求高」の見出し行の下に
-    金額行が並ぶ表形式の請求書のため）。無ければ列番号の近傍で探す（xlsx）。
+    cell_spans（OCRの各セルの左端・右端X座標）があれば、直下の行では
+    見出しの真下にある金額を選ぶ（「前回ご請求高｜…｜今回ご請求高」の
+    見出し行の下に金額行が並ぶ表形式の請求書のため）。OCRが見出し行や
+    金額行を1つの行テキストにまとめて返した場合も、文字位置から各見出し・
+    各金額のX座標を見積もって対応づける。無ければ列番号の近傍で探す（xlsx）。
     """
+    # 「合 計 金 額」のように字間に空白を入れた見出しにも合わせる
+    label_pat = re.compile(r"\s*".join(re.escape(ch) for ch in label))
     found: list[int] = []
     for r, row in enumerate(rows):
         for c, cell in enumerate(row):
-            # 「合 計 金 額」のように字間に空白を入れた見出しにも合わせる
-            norm_cell = re.sub(r"\s+", "", unicodedata.normalize("NFKC", cell))
-            if label not in norm_cell:
-                continue
-            if "率" in cell and "%" in cell:
-                continue
-            rest = norm_cell.split(label, 1)[1]
-            m = _EMBEDDED_AMOUNT_RE.search(rest)
-            if m:
-                a = _to_amount(m.group(0))
-                if a is not None:
-                    found.append(a)
+            norm_cell = unicodedata.normalize("NFKC", cell)
+            for m in label_pat.finditer(norm_cell):
+                after = norm_cell[m.end():].lstrip()
+                if after.startswith("率"):  # 「消費税率」は税額ではない
                     continue
-            picked = None
-            # 結合セルでラベルと金額が離れていることがあるため行末まで見る
-            for cc in range(c + 1, len(row)):
-                a = _to_amount(row[cc])
-                if a is not None:
-                    picked = a
-                    break
-            if picked is None:
-                label_x = cell_xs[r][c] if cell_xs else None
-                for rr in range(r + 1, min(r + 4, len(rows))):
-                    below = rows[rr]
-                    if label_x is not None:
-                        # 見出しの真下（X座標が最も近い）の金額
-                        cands = [
-                            (abs(cell_xs[rr][cc] - label_x), a)
-                            for cc in range(len(below))
-                            if (a := _to_amount(below[cc])) is not None
-                        ]
-                        if cands:
-                            picked = min(cands)[1]
-                    else:
-                        for cc in range(max(0, c - 1), min(c + 5, len(below))):
-                            a = _to_amount(below[cc])
-                            if a is not None:
-                                picked = a
-                                break
-                    if picked is not None:
+                # 1) 同じセルでラベルの後ろにある金額
+                same = _amount_tokens(after)
+                if same:
+                    found.append(same[0][0])
+                    continue
+                # 2) 右のセル（結合セルでラベルと金額が離れていることがある）
+                picked = None
+                for cc in range(c + 1, len(row)):
+                    toks = _amount_tokens(row[cc])
+                    if toks:
+                        picked = toks[0][0]
                         break
-            if picked is not None:
-                found.append(picked)
+                # 3) 直下の行
+                if picked is None:
+                    label_x = (
+                        _pos_center(cell_spans[r][c], len(norm_cell), m.start(), m.end())
+                        if cell_spans else None
+                    )
+                    for rr in range(r + 1, min(r + 4, len(rows))):
+                        below = rows[rr]
+                        if label_x is not None:
+                            cands = []
+                            for cc, cell2 in enumerate(below):
+                                norm2 = unicodedata.normalize("NFKC", cell2)
+                                for a, s, e in _amount_tokens(norm2):
+                                    x = _pos_center(cell_spans[rr][cc], len(norm2), s, e)
+                                    cands.append((abs(x - label_x), a))
+                            if cands:
+                                picked = min(cands)[1]
+                        else:
+                            for cc in range(max(0, c - 1), min(c + 5, len(below))):
+                                toks = _amount_tokens(below[cc])
+                                if toks:
+                                    picked = toks[0][0]
+                                    break
+                        if picked is not None:
+                            break
+                if picked is not None:
+                    found.append(picked)
     return found
 
 
 def _first_label_amount(
-    rows: list[list[str]], labels: tuple[str, ...], cell_xs: list[list[float]] | None = None
+    rows: list[list[str]], labels: tuple[str, ...], cell_spans: list[list[tuple[float, float]]] | None = None
 ) -> int | None:
     """ラベル候補を順に探し、最初に金額が見つかったものを返す。"""
     for label in labels:
-        amounts = _collect_label_amounts(rows, label, cell_xs)
+        amounts = _collect_label_amounts(rows, label, cell_spans)
         if amounts:
             return amounts[0]
     return None
@@ -467,7 +501,7 @@ def parse_invoice(
     subaccounts: list[dict] | None = None,
     account_names: list[str] | None = None,
     force_review: bool = False,
-    cell_xs: list[list[float]] | None = None,
+    cell_spans: list[list[tuple[float, float]]] | None = None,
 ) -> tuple[ParseResult, list[str]]:
     """請求書（1枚）を仕訳1本にする。
 
@@ -480,7 +514,7 @@ def parse_invoice(
     宛名（御中）にクライアント名があれば仕入、発行者にあれば売上と判定し、
     選択された書類タイプと食い違う場合は判定結果を優先して警告する。
 
-    cell_xs: OCR経由のとき、各セルの中心X座標（表の見出しの真下の金額を選ぶため）。
+    cell_spans: OCR経由のとき、各セルの左端・右端X座標（表の見出しの真下の金額を選ぶため）。
 
     戻り値: (ParseResult, マスタに無かった新しい取引先名のリスト)。
     """
@@ -529,10 +563,10 @@ def parse_invoice(
         )
 
     # 金額: 税込の当月額 → 税抜の当月額+消費税 → 請求額 の順
-    tax_incl = _first_label_amount(rows, _INVOICE_TAXINCL_LABELS, cell_xs)
-    base = _first_label_amount(rows, _INVOICE_BASE_LABELS, cell_xs)
-    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_xs)
-    billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_xs)
+    tax_incl = _first_label_amount(rows, _INVOICE_TAXINCL_LABELS, cell_spans)
+    base = _first_label_amount(rows, _INVOICE_BASE_LABELS, cell_spans)
+    taxes = _collect_label_amounts(rows, _INVOICE_TAX_LABEL, cell_spans)
+    billed = _first_label_amount(rows, _INVOICE_BILLED_LABELS, cell_spans)
     amount = None
     if tax_incl:
         amount = tax_incl
@@ -542,7 +576,7 @@ def parse_invoice(
         amount = billed
         carry = [
             a for label in _INVOICE_CARRY_LABELS
-            for a in _collect_label_amounts(rows, label, cell_xs)
+            for a in _collect_label_amounts(rows, label, cell_spans)
         ]
         if any(carry):
             needs_review = True
