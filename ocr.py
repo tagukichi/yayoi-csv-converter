@@ -282,6 +282,31 @@ def lines_from_read_results(read_results: list[dict]) -> list[OcrLine]:
     return lines
 
 
+def pdf_text_ocr_lines(file_bytes: bytes) -> list[OcrLine]:
+    """文字が埋め込まれたPDFから、OCRと同じ形の座標付きの行を作る。
+
+    Excel等から出力したPDFはOCRを使わずに読める（Azureの回数を消費しない）。
+    スキャンしたPDF（文字が無い）なら空のリストを返すので、そのときはOCRに回す。
+    """
+    import pdfplumber
+
+    lines: list[OcrLine] = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page_no, page in enumerate(pdf.pages, start=1):
+            for w in page.extract_words(keep_blank_chars=True, x_tolerance=2):
+                lines.append(
+                    OcrLine(
+                        text=w["text"],
+                        x=w["x0"],
+                        y=(w["top"] + w["bottom"]) / 2,
+                        height=w["bottom"] - w["top"],
+                        page=page_no,
+                        width=w["x1"] - w["x0"],
+                    )
+                )
+    return lines
+
+
 def run_ocr_lines(
     file_bytes: bytes, *, language: str = "ja", timeout_sec: int = 120
 ) -> list[OcrLine]:

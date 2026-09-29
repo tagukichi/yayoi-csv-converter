@@ -104,6 +104,16 @@ create table if not exists payroll_deductions (
   unique (client, label)
 );
 
+-- 部門マスタ（クライアント別）。弥生の仕訳CSVの借方部門・貸方部門の列や、
+-- 会社が作った部門一覧（PDF・画像）から登録する（任意の事前登録）
+create table if not exists departments (
+  id bigint generated always as identity primary key,
+  client text not null,
+  name text not null,
+  created_at timestamptz not null default now(),
+  unique (client, name)
+);
+
 -- 売掛表・買掛表の「行番号 → 取引先名」の対応（クライアント別）
 -- side: sales=売掛表（売上）, purchase=買掛表
 create table if not exists partner_rows (
@@ -142,6 +152,10 @@ create table if not exists master_meta (
 -- 仕訳の備考（日付を読み取れず本日日付を仮置き、残高不一致 など）
 alter table entries add column if not exists note text not null default '';
 
+-- 仕訳の部門（弥生CSVの借方部門・貸方部門の列に出る）
+alter table entries add column if not exists debit_dept text not null default '';
+alter table entries add column if not exists credit_dept text not null default '';
+
 -- 企業セレクタの表示設定（ピン留め・最後に開いた日時）
 -- ログイン導入後は user_id を足して人ごとの設定にする
 create table if not exists client_prefs (
@@ -174,5 +188,6 @@ alter table account_rules  enable row level security;
 alter table doctype_rules  enable row level security;
 alter table partner_rows   enable row level security;
 alter table payroll_deductions enable row level security;
+alter table departments    enable row level security;
 alter table master_meta    enable row level security;
 alter table client_prefs   enable row level security;
