@@ -33,7 +33,8 @@ CREDIT_ACCOUNT_BY_DOC_TYPE = {
 _DOC_TYPE_SIGNALS = {
     # 「利用明細」は「ご利用明細」と二重に一致するため入れない
     "カード明細": ("ご利用明細", "ご利用代金明細", "カード名義", "利用店名", "支払方法", "お支払い月", "利用金額", "回払い"),
-    "通帳": ("普通預金", "お預り金額", "お支払金額", "差引残高", "繰越", "通帳", "当座預金"),
+    "通帳": ("普通預金", "お預り金額", "お支払金額", "差引残高", "繰越", "通帳", "当座預金",
+           "決算利息", "自動機提携", "取扱店"),
     "領収書": ("領収書", "領収証", "レシート", "お買上", "お釣り", "上様"),
     "電子請求書": ("請求書", "御請求書", "御見積", "お振込先", "振込期日", "支払期日"),
     "給与台帳": ("給与台帳", "給料台帳", "支給月分", "月例給与計", "差引支給額", "非課税分賃金"),
@@ -53,7 +54,9 @@ def detect_document_type(lines: list[str], selected: str | None = None) -> str |
     選択されたタイプに加点したうえで、2位に明確な差（2語以上）を
     付けた場合だけ判定を返す。
     """
-    text = " ".join(lines)
+    # OCRは「お 支払 金額」「差 引残 高」のように語の途中に空白を入れることが
+    # あるので、空白を除いてから語を探す
+    text = re.sub(r"\s+", "", " ".join(lines))
     scores = {t: sum(1 for kw in kws if kw in text) for t, kws in _DOC_TYPE_SIGNALS.items()}
     if selected in scores:
         scores[selected] += _SELECTED_TYPE_BONUS
@@ -619,6 +622,16 @@ def _era_or_western(y: int, mo: int, d: int) -> date | None:
         return None
 
 
+def _normalize_date_cell(text: str) -> str:
+    """通帳の日付セルのOCRのゆれを直す。
+
+    行番号が「:」「.」に化けて頭に付く（「: 04.11.01」）、区切りが中黒になる
+    （「04·12·30」）ため、頭の数字以外を落とし、中黒はピリオドにする。
+    """
+    text = text.strip().replace("·", ".").replace("・", ".").replace("．", ".")
+    return re.sub(r"^[^\d]+", "", text)
+
+
 def _parse_cell_date(text: str) -> date | None:
     """表のセル1つを日付として解釈する。
 
@@ -626,7 +639,7 @@ def _parse_cell_date(text: str) -> date | None:
     多い。また左端の行番号がくっついた「1008.04.24」（行番号10＋08.04.24）
     にも対応する。
     """
-    text = text.strip()
+    text = _normalize_date_cell(text)
     m = _CELL_DATE_PATTERN.match(text)
     if m:
         found = _era_or_western(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -700,6 +713,8 @@ def _split_row(
 
         # 3) 混在セル: 先頭の日付を剥がす
         if row_date is None and month_day is None:
+            if re.match(r"^[^\d]{0,3}\d", text):
+                text = _normalize_date_cell(text)
             m = _CELL_DATE_PREFIX.match(text)
             if m:
                 d = _parse_cell_date(m.group(0).strip())
@@ -731,7 +746,8 @@ def _split_row(
                     amounts.append((value, cell.x))
         text = _EMBEDDED_AMOUNT.sub(" ", text).strip()
 
-        if text:
+        # 「¥1,132,012/」の「/」のように、金額を抜いた残りが記号だけなら摘要にしない
+        if text and re.search(r"[0-9A-Za-z\u3040-\u30ff\u4e00-\u9fff]", text):
             desc_parts.append(text)
     return row_date, month_day, " ".join(p for p in desc_parts if p), amounts
 
@@ -784,6 +800,30 @@ class _RowDateResolver:
             return None, False
 
 
+def _learn_bankbook_columns(rows: list[list[OcrLine]]) -> tuple[list[float], list[float]]:
+    """残高の連続性（前残高 ± 入出金 = 残高）が成り立つ行から、出金列・入金列の
+    X座標を学ぶ。戻り値: (出金列のX一覧, 入金列のX一覧)。"""
+    withdraw_xs: list[float] = []
+    deposit_xs: list[float] = []
+    prev_balance: int | None = None
+    for cells in rows:
+        _d, _md, _desc, amounts = _split_row(cells)
+        if not amounts:
+            continue
+        if len(amounts) == 1:
+            prev_balance = amounts[0][0]
+            continue
+        movement, movement_x = amounts[-2]
+        balance = amounts[-1][0]
+        if prev_balance is not None:
+            if prev_balance + movement == balance:
+                deposit_xs.append(movement_x)
+            elif prev_balance - movement == balance:
+                withdraw_xs.append(movement_x)
+        prev_balance = balance
+    return withdraw_xs, deposit_xs
+
+
 def _parse_bankbook(
     rows: list[list[OcrLine]],
     result: ParseResult,
@@ -798,9 +838,9 @@ def _parse_bankbook(
     prev_balance: int | None = None
     last_date: date | None = None
     resolver = _RowDateResolver(rows, result)
-    # 残高チェックで確定できた列位置を覚えて、チェック不能行の判定に使う
-    withdraw_xs: list[float] = []
-    deposit_xs: list[float] = []
+    # 残高チェックで確定できた列位置を覚えて、チェック不能行の判定に使う。
+    # 先頭行（前の残高が無い）のために、先に全行を見て列位置を学んでおく
+    withdraw_xs, deposit_xs = _learn_bankbook_columns(rows)
 
     for cells in rows:
         full_date, month_day, desc, amounts = _split_row(cells)
@@ -837,11 +877,13 @@ def _parse_bankbook(
         else:
             # 残高チェック不成立。既知の列位置から推定し、要確認にする
             needs_review = True
-            note = "残高チェック不一致（入出金の向き・金額を確認）"
             if prev_balance is not None:
+                note = "残高チェック不一致（入出金の向き・金額を確認）"
                 result.warnings.append(
                     f"残高が合いません: {entry_date} {desc}（要確認にしました）"
                 )
+            else:
+                note = "前の残高が無く検算できません（入出金の向きを確認）"
             if deposit_xs and withdraw_xs:
                 is_deposit = abs(movement_x - _mean(deposit_xs)) < abs(
                     movement_x - _mean(withdraw_xs)
